@@ -153,18 +153,38 @@ MITM 代理**确实在解析后转发**，而且**指纹确实有意义**：
 ### 启动代理服务器
 
 ```bash
-cd services/fastls-mitm
-./mitm_proxy.exe -addr :8888 -browser chrome142
+# Linux/macOS
+./fastls-mitm -addr :8888 -browser chrome142
+
+# Windows
+fastls-mitm.exe -addr :8888 -browser chrome142
+
+# 使用缩写参数
+./fastls-mitm -a :8888 -b chrome142 -d
 ```
 
 ### 命令行参数
 
-- `-addr`: 监听地址（默认: `:8888`）
-- `-browser`: 浏览器类型（`chrome`, `chrome120`, `chrome142`, `chromium`, `edge`, `firefox`, `safari`, `opera`，默认: `chrome142`）
-- `-ja3`: 自定义 JA3 指纹字符串（如果指定，将忽略 browser 参数）
-- `-ja4r`: 自定义 JA4R 指纹字符串（如果指定，将忽略 browser 参数）
-- `-ca-cert`: CA 证书文件路径（默认: `mitm-ca-cert.pem`）
-- `-ca-key`: CA 私钥文件路径（默认: `mitm-ca-key.pem`）
+所有参数都支持完整和缩写两种形式：
+
+| 完整参数 | 缩写 | 说明 | 默认值 |
+|---------|------|------|--------|
+| `-addr` | `-a` | 监听地址 | `:8888` |
+| `-browser` | `-b` | 浏览器类型 | `chrome142` |
+| `-ja3` | `-j3` | 自定义 JA3 指纹字符串 | - |
+| `-ja4r` | `-j4` | 自定义 JA4R 指纹字符串 | - |
+| `-ca-cert` | `-c` | CA 证书文件路径 | `mitm-ca-cert.pem` |
+| `-ca-key` | `-k` | CA 私钥文件路径 | `mitm-ca-key.pem` |
+| `-disable-connect` | `-dc` | 禁用 CONNECT 隧道请求 | `false` |
+| `-debug` | `-d` | 启用 Debug 模式 | `false` |
+| `-version` | `-v` | 显示版本信息并退出 | - |
+| `-help` | `-h` | 显示帮助信息并退出 | - |
+
+**浏览器类型选项**: `chrome`, `chrome120`, `chrome142`, `chromium`, `edge`, `firefox`, `safari`, `opera`
+
+**注意**: 
+- 如果指定了 `-ja3` 或 `-ja4r`，将忽略 `-browser` 参数
+- 可以混合使用完整参数和缩写参数
 
 ### 配置代理
 
@@ -213,6 +233,39 @@ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keyc
 ```
 
 ## 使用示例
+
+### 基本使用
+
+```bash
+# 使用默认配置启动（监听 :8888，使用 chrome142 指纹）
+./fastls-mitm
+
+# 指定监听地址和浏览器类型
+./fastls-mitm -addr :8888 -browser chrome142
+
+# 使用缩写参数
+./fastls-mitm -a :8888 -b chrome142
+
+# 启用调试模式
+./fastls-mitm -a :8888 -b chrome142 -debug
+# 或使用缩写
+./fastls-mitm -a :8888 -b chrome142 -d
+
+# 使用自定义 JA3 指纹
+./fastls-mitm -a :8888 -ja3 "771,4865-4866-4867,43-10-51-11-13-0-16-45,29-23-24,1"
+# 或使用缩写
+./fastls-mitm -a :8888 -j3 "771,4865-4866-4867,43-10-51-11-13-0-16-45,29-23-24,1"
+
+# 查看版本信息
+./fastls-mitm -version
+# 或使用缩写
+./fastls-mitm -v
+
+# 查看帮助信息
+./fastls-mitm -help
+# 或使用缩写
+./fastls-mitm -h
+```
 
 ### curl
 
