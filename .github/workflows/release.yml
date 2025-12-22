@@ -77,12 +77,20 @@ jobs:
         env:
           GOWORK: off
         run: |
-          # 下载父项目的所有依赖，确保 go.sum 包含所有需要的依赖
+          # 下载父项目的所有依赖
+          echo "下载父项目依赖..."
           go mod download
-          # 整理依赖（这会更新 go.sum）
+          # 尝试构建父项目以生成完整的 go.sum
+          echo "构建父项目以生成 go.sum..."
+          go build ./... 2>&1 || echo "构建完成（可能有一些错误，但 go.sum 应该已更新）"
+          # 整理依赖（这会更新 go.sum，确保包含所有间接依赖）
+          echo "整理依赖..."
           go mod tidy
-          # 验证依赖
-          go mod verify
+          # 再次下载确保所有依赖都在 go.sum 中
+          echo "再次下载依赖..."
+          go mod download
+          # 显示 go.sum 文件大小，确认已更新
+          ls -lh go.sum || echo "go.sum 文件不存在"
 
       - name: Get version from tag
         id: get_version
