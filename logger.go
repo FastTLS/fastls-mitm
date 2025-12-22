@@ -32,12 +32,12 @@ func logRequest(method, url string, fingerprintInfo ...string) {
 
 	var extraInfo []string
 
-	// 如果有指纹信息，添加到消息中（不在字段中重复）
+	// 添加指纹信息到消息
 	if len(fingerprintInfo) > 0 && fingerprintInfo[0] != "" {
 		extraInfo = append(extraInfo, fmt.Sprintf("fingerprint=%s", fingerprintInfo[0]))
 	}
 
-	// 如果有代理信息，添加到消息中（不在字段中重复）
+	// 添加代理信息到消息
 	if len(fingerprintInfo) > 1 && fingerprintInfo[1] != "" {
 		extraInfo = append(extraInfo, fmt.Sprintf("proxy=%s", fingerprintInfo[1]))
 	}

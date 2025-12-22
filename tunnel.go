@@ -26,13 +26,13 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 
 	var rawConn net.Conn
 	if parentProxy != nil {
-		// 通过上级代理连接
+		// 通过代理连接
 		rawConn, err = p.dialThroughProxy(ctx, network, addr, parentProxy)
 		if err != nil {
-			return nil, fmt.Errorf("通过上级代理连接失败: %v", err)
+			return nil, fmt.Errorf("通过代理连接失败: %v", err)
 		}
 	} else {
-		// 直接连接
+		// 直连
 		rawConn, err = net.DialTimeout(network, addr, 30*time.Second)
 		if err != nil {
 			return nil, err
@@ -129,21 +129,27 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			proxyInfo = headerProxy.String()
 		}
 
-		// 记录 HTTPS 请求日志（包含指纹和代理信息）
+		// 记录 HTTPS 请求日志
 		targetURL := fmt.Sprintf("https://%s%s", hostname, req.URL.Path)
 		if req.URL.RawQuery != "" {
 			targetURL += "?" + req.URL.RawQuery
 		}
 		logRequest(req.Method, targetURL, fingerprintInfo, proxyInfo)
 
-		// 如果是第一个请求，且连接未建立，则建立连接
+		// 第一个请求且连接未建立时建立连接
 		if firstRequest && targetConn == nil {
 			// 从 Context 获取连接参数
 			host := ctx.Data["host"].(string)
 			forceProtocol := ctx.Data["forceProtocol"].(string)
 			oldRequestConfig := ctx.Data["requestConfig"].(*RequestFingerprintConfig)
 
-			// 优先使用请求头中的代理信息，如果没有则使用 Context 中保存的代理信息
+			// 优先使用当前请求头的指纹配置，否则使用 Context 中的配置
+			fingerprintConfigToUse := requestConfig
+			if fingerprintConfigToUse == nil || !fingerprintConfigToUse.Override {
+				fingerprintConfigToUse = oldRequestConfig
+			}
+
+			// 优先使用请求头的代理信息，否则使用 Context 中的代理信息
 			proxyToUse := headerProxy
 			if proxyToUse == nil {
 				if savedProxy, ok := ctx.Data["parentProxy"].(*url.URL); ok && savedProxy != nil {
@@ -154,12 +160,10 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			if proxyToUse != nil {
 				logDebug("使用代理建立连接: %s", proxyToUse.String())
 			} else {
-				logDebug("直接建立连接（未使用代理）")
+				logDebug("直连（未使用代理）")
 			}
-
-			// 建立连接
 			ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			newTargetConn, err := p.dialTLSWithFingerprint(ctxTimeout, "tcp", host, forceProtocol, oldRequestConfig, proxyToUse)
+			newTargetConn, err := p.dialTLSWithFingerprint(ctxTimeout, "tcp", host, forceProtocol, fingerprintConfigToUse, proxyToUse)
 			cancel()
 			if err != nil {
 				logError("建立连接失败 %s: %v", host, err)
@@ -329,20 +333,19 @@ func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, req
 	return newReq
 }
 
-// dialThroughProxy 通过上级代理建立连接
-// 参考: https://github.com/ouqiang/goproxy
+// dialThroughProxy 通过代理建立连接
 func (p *MITMProxy) dialThroughProxy(ctx context.Context, network, addr string, proxyURL *url.URL) (net.Conn, error) {
-	// 连接到代理服务器
+	// 连接代理服务器
 	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 30*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("连接到代理服务器失败: %v", err)
+		return nil, fmt.Errorf("连接代理服务器失败: %v", err)
 	}
 
 	// 发送 CONNECT 请求
 	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
 	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
 		proxyConn.Close()
-		return nil, fmt.Errorf("发送CONNECT请求失败: %v", err)
+		return nil, fmt.Errorf("发送 CONNECT 请求失败: %v", err)
 	}
 
 	// 读取响应

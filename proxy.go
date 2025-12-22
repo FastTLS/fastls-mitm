@@ -19,15 +19,12 @@ import (
 )
 
 // CertCache 证书缓存接口
-// 参考: https://github.com/ouqiang/goproxy
 type CertCache interface {
-	// Set 保存证书
 	Set(host string, cert *tls.Certificate)
-	// Get 获取证书
 	Get(host string) *tls.Certificate
 }
 
-// DefaultCertCache 默认的内存证书缓存实现
+// DefaultCertCache 默认内存证书缓存
 type DefaultCertCache struct {
 	certCache map[string]*tls.Certificate
 	certMutex sync.RWMutex
@@ -65,7 +62,7 @@ type MITMProxy struct {
 	delegate       Delegate
 }
 
-// NewMITMProxyOptions 创建 MITMProxy 的选项
+// NewMITMProxyOptions MITMProxy 配置选项
 type NewMITMProxyOptions struct {
 	ListenAddr     string
 	Fingerprint    fastls.Fingerprint
@@ -75,7 +72,7 @@ type NewMITMProxyOptions struct {
 	CertCache      CertCache
 }
 
-// NewMITMProxy 创建新的 MITM 代理服务器
+// NewMITMProxy 创建 MITM 代理服务器
 func NewMITMProxy(listenAddr string, fingerprint fastls.Fingerprint, browser string, disableConnect bool) (*MITMProxy, error) {
 	return NewMITMProxyWithOptions(NewMITMProxyOptions{
 		ListenAddr:     listenAddr,
@@ -87,8 +84,7 @@ func NewMITMProxy(listenAddr string, fingerprint fastls.Fingerprint, browser str
 	})
 }
 
-// NewMITMProxyWithOptions 使用选项创建新的 MITM 代理服务器
-// 参考: https://github.com/ouqiang/goproxy
+// NewMITMProxyWithOptions 使用配置选项创建 MITM 代理服务器
 func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 	if opts.Delegate == nil {
 		opts.Delegate = &DefaultDelegate{}
@@ -125,12 +121,12 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// 调用 Delegate.Connect
 	p.delegate.Connect(ctx, w)
 
-	// 检查是否被中止
+	// 检查是否中止
 	if ctx.Aborted {
 		return
 	}
 
-	// 解析指纹和代理信息（用于日志输出）
+	// 解析指纹和代理信息
 	requestConfig := parseFingerprintFromHeaders(r.Header)
 	headerProxy, _ := parseProxyFromHeaders(r.Header)
 
@@ -141,7 +137,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logRequest("CONNECT", host, fingerprintInfo, proxyInfo)
-	logDebug("收到CONNECT请求: %s -> %s", r.RemoteAddr, host)
+	logDebug("收到 CONNECT 请求: %s -> %s", r.RemoteAddr, host)
 
 	if p.disableConnect {
 		logResponse("CONNECT", host, http.StatusMethodNotAllowed, "Method Not Allowed", nil)
@@ -246,7 +242,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 如果请求头中没有代理信息，则从 Delegate 获取
+	// 优先使用请求头的代理信息，否则从 Delegate 获取
 	var parentProxy *url.URL
 	if headerProxy != nil {
 		parentProxy = headerProxy
@@ -254,12 +250,11 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	} else {
 		parentProxy, err = p.delegate.ParentProxy(r)
 		if err != nil {
-			logError("获取上级代理失败: %v", err)
+			logError("获取代理失败: %v", err)
 		}
 	}
 
-	// 如果 CONNECT 阶段没有代理信息，延迟建立连接，等到第一个 HTTPS 请求到达时再建立
-	// 这样可以获取 HTTPS 请求头中的代理信息
+	// CONNECT 阶段无代理信息时延迟建立连接，等待第一个 HTTPS 请求获取代理信息
 	var targetConn net.Conn
 	if parentProxy == nil {
 		// 延迟建立连接，在 handleHTTP1Tunnel 中从第一个 HTTPS 请求获取代理信息
@@ -277,7 +272,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		defer targetConn.Close()
 	}
 
-	// 如果连接已建立，检查协议
+	// 检查已建立连接的协议
 	targetProtocol := ""
 	if targetConn != nil {
 		if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
@@ -286,7 +281,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 将连接信息存储到 Context 中，以便在 handleHTTP1Tunnel 中可以使用代理信息建立连接
+	// 将连接信息存储到 Context，供 handleHTTP1Tunnel 使用
 	ctx.Data["host"] = host
 	ctx.Data["forceProtocol"] = forceProtocol
 	ctx.Data["requestConfig"] = requestConfig
@@ -343,7 +338,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 解析指纹和代理信息（用于日志输出）
+	// 解析指纹和代理信息
 	requestConfig := parseFingerprintFromHeaders(r.Header)
 	headerProxy, _ := parseProxyFromHeaders(r.Header)
 
@@ -381,7 +376,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 使用上下文中的 Options
+	// 初始化上下文 Options
 	if ctx.Options == nil {
 		ctx.Options = &fastls.Options{
 			Timeout: 30,
@@ -403,13 +398,13 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// 调用 Delegate.BeforeRequest
 	p.delegate.BeforeRequest(ctx)
 
-	// 检查是否被中止
+	// 检查是否中止
 	if ctx.Aborted {
 		p.delegate.Finish(ctx)
 		return
 	}
 
-	// 如果请求头中没有代理信息，则从 Delegate 获取
+	// 优先使用请求头的代理信息，否则从 Delegate 获取
 	var parentProxy *url.URL
 	if headerProxy != nil {
 		parentProxy = headerProxy
@@ -421,7 +416,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 如果设置了上级代理，更新 Options
+	// 设置代理到 Options
 	if parentProxy != nil {
 		ctx.Options.Proxy = parentProxy.String()
 	}
@@ -429,7 +424,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	client := fastls.NewClient()
 	resp, err := client.Do(targetURL, *ctx.Options, r.Method)
 
-	// 将 fastls.Response 转换为 http.Response（用于 BeforeResponse）
+	// 将 fastls.Response 转换为 http.Response
 	var httpResp *http.Response
 	if err == nil {
 		httpResp = &http.Response{
@@ -445,7 +440,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// 调用 Delegate.BeforeResponse
 	p.delegate.BeforeResponse(ctx, httpResp, err)
 
-	// 检查是否被中止
+	// 检查是否中止
 	if ctx.Aborted {
 		if err == nil {
 			resp.Body.Close()

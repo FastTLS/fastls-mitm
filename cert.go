@@ -91,7 +91,7 @@ func (p *MITMProxy) generateCA() error {
 }
 
 func (p *MITMProxy) getCertForHost(host string) (*tls.Certificate, error) {
-	// 先从缓存获取
+	// 从缓存获取
 	if cert := p.certCache.Get(host); cert != nil {
 		return cert, nil
 	}
@@ -126,7 +126,7 @@ func (p *MITMProxy) getCertForHost(host string) (*tls.Certificate, error) {
 		PrivateKey:  key,
 	}
 
-	// 保存到缓存
+	// 缓存证书
 	p.certCache.Set(host, cert)
 
 	return cert, nil

@@ -37,8 +37,8 @@ func parseFingerprintFromHeaders(headers http.Header) *RequestFingerprintConfig 
 	return config
 }
 
-// parseProxyFromHeaders 从请求头中解析代理信息
-// 支持的请求头: X-Mitm-Proxy
+// parseProxyFromHeaders 从请求头解析代理信息
+// 支持请求头: X-Mitm-Proxy
 // 格式: http://proxy.example.com:8080 或 http://user:pass@proxy.example.com:8080
 func parseProxyFromHeaders(headers http.Header) (*url.URL, error) {
 	proxyStr := headers.Get("X-Mitm-Proxy")
@@ -51,7 +51,7 @@ func parseProxyFromHeaders(headers http.Header) (*url.URL, error) {
 		return nil, fmt.Errorf("解析代理URL失败: %v", err)
 	}
 
-	// 确保是有效的代理URL
+	// 验证代理协议
 	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" && proxyURL.Scheme != "socks5" {
 		return nil, fmt.Errorf("不支持的代理协议: %s (仅支持 http, https, socks5)", proxyURL.Scheme)
 	}
@@ -59,13 +59,12 @@ func parseProxyFromHeaders(headers http.Header) (*url.URL, error) {
 	return proxyURL, nil
 }
 
-// formatFingerprintInfo 格式化指纹信息用于日志输出
+// formatFingerprintInfo 格式化指纹信息用于日志
 func formatFingerprintInfo(config *RequestFingerprintConfig) string {
 	if config == nil {
 		return ""
 	}
 
-	// 检查是否有任何指纹信息被设置
 	if config.JA3 != "" {
 		return fmt.Sprintf("JA3:%s", config.JA3)
 	}
@@ -86,12 +85,28 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 	var userAgent string
 
 	if requestConfig != nil && requestConfig.Override {
+		// 检查是否同时设置了多个指纹类型
+		fingerprintCount := 0
+		if requestConfig.JA3 != "" {
+			fingerprintCount++
+		}
+		if requestConfig.JA4R != "" {
+			fingerprintCount++
+		}
+		if requestConfig.Browser != "" {
+			fingerprintCount++
+		}
+		if fingerprintCount > 1 {
+			logDebug("警告: 同时设置了多个指纹类型，将按优先级使用: JA3 > JA4R > Browser")
+		}
+
+		// 优先级: JA3 > JA4R > Browser
 		if requestConfig.JA3 != "" {
 			fingerprint = fastls.Ja3Fingerprint{
 				FingerprintValue: requestConfig.JA3,
 			}
 			options.Fingerprint = fingerprint
-			logDebug("使用请求头指定的JA3指纹: %s", requestConfig.JA3)
+			logDebug("使用请求头指定的 JA3 指纹: %s", requestConfig.JA3)
 			return fingerprint, userAgent
 		}
 
@@ -100,7 +115,7 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 				FingerprintValue: requestConfig.JA4R,
 			}
 			options.Fingerprint = fingerprint
-			logDebug("使用请求头指定的JA4R指纹: %s", requestConfig.JA4R)
+			logDebug("使用请求头指定的 JA4R 指纹: %s", requestConfig.JA4R)
 			return fingerprint, userAgent
 		}
 
