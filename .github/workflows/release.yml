@@ -121,6 +121,14 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Release version: $VERSION"
+          
+          # 检查是否为 beta/alpha/rc 版本
+          if [[ "$VERSION" =~ (beta|alpha|rc) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+            echo "检测到预发布版本: $VERSION"
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -194,7 +202,7 @@ jobs:
             ```
           files: release/*
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.get_version.outputs.is_prerelease == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
