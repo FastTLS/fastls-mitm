@@ -64,28 +64,29 @@ jobs:
       - name: Set up directory structure
         shell: bash
         run: |
+          set -e
           # 验证目录结构
           echo "检查父项目目录..."
           if [ ! -d "workspace" ]; then
             echo "错误: 父项目目录不存在"
             exit 1
           fi
-          echo "父项目目录内容:"
-          ls -la workspace || dir workspace
+          echo "父项目目录存在，列出前10个文件/目录:"
+          find workspace -maxdepth 1 -type f -o -type d | head -10 || echo "无法列出文件"
           
           echo "检查子项目目录..."
           if [ ! -d "workspace/services/fastls-mitm" ]; then
             echo "错误: 子项目目录不存在"
             exit 1
           fi
-          echo "子项目目录内容:"
-          ls -la workspace/services/fastls-mitm || dir workspace/services/fastls-mitm
+          echo "子项目目录存在，列出前10个文件/目录:"
+          find workspace/services/fastls-mitm -maxdepth 1 -type f -o -type d | head -10 || echo "无法列出文件"
           
           # 验证 go.mod 文件
           echo "检查父项目 go.mod..."
           if [ -f "workspace/go.mod" ]; then
-            echo "父项目 go.mod 存在"
-            head -5 workspace/go.mod
+            echo "父项目 go.mod 存在，前5行:"
+            head -5 workspace/go.mod || sed -n '1,5p' workspace/go.mod
           else
             echo "错误: 父项目 go.mod 不存在"
             exit 1
@@ -93,7 +94,7 @@ jobs:
           
           echo "检查子项目 go.mod..."
           if [ -f "workspace/services/fastls-mitm/go.mod" ]; then
-            echo "子项目 go.mod 存在"
+            echo "子项目 go.mod 存在，内容:"
             cat workspace/services/fastls-mitm/go.mod
           else
             echo "错误: 子项目 go.mod 不存在"
