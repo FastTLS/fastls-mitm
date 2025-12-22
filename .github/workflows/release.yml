@@ -48,8 +48,24 @@ jobs:
             ext: ''
 
     steps:
+      - name: Checkout parent repository
+        uses: actions/checkout@v4
+        with:
+          repository: FastTLS/fastls
+          path: workspace
+
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          path: workspace/services/fastls-mitm
+
+      - name: Set up directory structure
+        run: |
+          # 验证目录结构
+          ls -la workspace
+          ls -la workspace/services/fastls-mitm
+          # 确保 go.mod 中的 replace 指令能够找到父项目
+          # replace github.com/FastTLS/fastls => ../../ 应该指向 workspace/
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -77,6 +93,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         shell: bash
+        working-directory: workspace/services/fastls-mitm
         run: |
           VERSION="${{ steps.get_version.outputs.version || steps.get_version_input.outputs.version || 'dev' }}"
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -98,7 +115,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fastls-mitm-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: fastls-mitm${{ matrix.ext }}
+          path: workspace/services/fastls-mitm/fastls-mitm${{ matrix.ext }}
           retention-days: 30
 
   release:
