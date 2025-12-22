@@ -1,0 +1,200 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # 当推送以 v 开头的 tag 时触发（例如: v1.0.0）
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      version:
+        description: '版本号 (例如: 1.0.0)'
+        required: true
+        default: '1.0.0'
+
+jobs:
+  build:
+    name: Build fastls-mitm
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: .exe
+          - os: windows-latest
+            goos: windows
+            goarch: 386
+            ext: .exe
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: ''
+          - os: ubuntu-latest
+            goos: linux
+            goarch: 386
+            ext: ''
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: ''
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Get version from tag
+        id: get_version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Get version from input
+        id: get_version_input
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          echo "Version: ${{ github.event.inputs.version }}"
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        shell: bash
+        run: |
+          VERSION="${{ steps.get_version.outputs.version || steps.get_version_input.outputs.version || 'dev' }}"
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          COMMIT_SHA=${GITHUB_SHA::8}
+          
+          OUTPUT_NAME="fastls-mitm${{ matrix.ext }}"
+          
+          go build -ldflags "-s -w -X 'main.version=$VERSION' -X 'main.buildTime=$BUILD_TIME' -X 'main.gitCommit=$COMMIT_SHA'" \
+            -o "$OUTPUT_NAME" .
+          
+          echo "Built: $OUTPUT_NAME"
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            dir "$OUTPUT_NAME"
+          else
+            ls -lh "$OUTPUT_NAME"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastls-mitm-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: fastls-mitm${{ matrix.ext }}
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Release version: $VERSION"
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          cd artifacts
+          for dir in */; do
+            platform=$(basename "$dir")
+            file=$(find "$dir" -type f -name "fastls-mitm*" | head -1)
+            if [ -n "$file" ]; then
+              filename=$(basename "$file")
+              cp "$file" "../release/fastls-mitm-$platform-${{ steps.get_version.outputs.version }}"
+              if [[ "$filename" == *.exe ]]; then
+                mv "../release/fastls-mitm-$platform-${{ steps.get_version.outputs.version }}" \
+                   "../release/fastls-mitm-$platform-${{ steps.get_version.outputs.version }}.exe"
+              fi
+            fi
+          done
+          cd ../release
+          ls -lh
+
+      - name: Create checksums
+        run: |
+          cd release
+          for file in *; do
+            if [ -f "$file" ] && [[ ! "$file" == *.sha256 ]]; then
+              sha256sum "$file" > "${file}.sha256"
+            fi
+          done
+          ls -lh
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          name: fastls-mitm v${{ steps.get_version.outputs.version }}
+          body: |
+            ## fastls-mitm v${{ steps.get_version.outputs.version }}
+            
+            ### 下载
+            
+            请根据您的操作系统下载对应的可执行文件：
+            
+            - **Windows**: `fastls-mitm-windows-*.exe`
+            - **Linux**: `fastls-mitm-linux-*`
+            - **macOS**: `fastls-mitm-darwin-*`
+            
+            ### 使用说明
+            
+            1. 下载对应平台的可执行文件
+            2. 重命名为 `fastls-mitm` (Linux/macOS) 或 `fastls-mitm.exe` (Windows)
+            3. 添加执行权限 (Linux/macOS): `chmod +x fastls-mitm`
+            4. 运行: `./fastls-mitm -addr :8888 -browser chrome142`
+            
+            详细使用说明请参考 [README.md](README.md)
+            
+            ### 校验
+            
+            下载后请使用对应的 `.sha256` 文件校验文件完整性：
+            
+            ```bash
+            # Linux/macOS
+            sha256sum -c fastls-mitm-*.sha256
+            
+            # Windows (PowerShell)
+            Get-FileHash fastls-mitm-*.exe | Format-List
+            ```
+          files: release/*
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
