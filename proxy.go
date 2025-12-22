@@ -15,6 +15,7 @@ import (
 	"time"
 
 	fastls "github.com/FastTLS/fastls"
+	utls "github.com/refraction-networking/utls"
 	"github.com/sirupsen/logrus"
 )
 
@@ -220,11 +221,9 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientProtocol := tlsConn.ConnectionState().NegotiatedProtocol
 	logProtocol("客户端协商的协议: %s", clientProtocol)
 
+	// 不强制协议版本，让代理到服务端默认优先使用 HTTP/2
+	// 客户端到代理的协议版本不影响代理到服务端的协议选择
 	forceProtocol := ""
-	if clientProtocol == "" || clientProtocol == "http/1.1" {
-		forceProtocol = "http/1.1"
-		logProtocol("强制目标服务器使用协议: %s", forceProtocol)
-	}
 
 	// 调用 Delegate.Auth
 	if !p.delegate.Auth(ctx, w) {
@@ -278,6 +277,9 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
 			targetProtocol = tlsTargetConn.ConnectionState().NegotiatedProtocol
 			logProtocol("目标服务器协商的协议: %s", targetProtocol)
+		} else if utlsConn, ok := targetConn.(*utls.UConn); ok {
+			targetProtocol = utlsConn.ConnectionState().NegotiatedProtocol
+			logProtocol("目标服务器协商的协议: %s", targetProtocol)
 		}
 	}
 
@@ -288,18 +290,23 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx.Data["targetConn"] = targetConn
 	ctx.Data["parentProxy"] = parentProxy
 
-	if targetConn != nil && targetProtocol == "h2" {
-		logHTTP2("检测到目标服务器使用 HTTP/2，切换到透明转发模式")
+	// 只有当客户端和服务器都使用相同协议（都是 h2）时，才使用透明转发
+	// 如果客户端是 HTTP/1.1，即使服务器协商了 h2，也使用 HTTP/1.1 方式处理
+	// 因为服务器虽然协商了 h2，但通常也支持 HTTP/1.1
+	if targetConn != nil && clientProtocol == "h2" && targetProtocol == "h2" {
+		logHTTP2("客户端和服务器都使用 HTTP/2，切换到透明转发模式")
 		p.handleTransparentTunnel(tlsConn, targetConn)
 		return
 	}
 
 	if (clientProtocol == "" || clientProtocol == "http/1.1") &&
-		(targetConn == nil || targetProtocol == "" || targetProtocol == "http/1.1") {
+		(targetConn == nil || targetProtocol == "" || targetProtocol == "http/1.1" || targetProtocol == "h2") {
+		// 客户端是 HTTP/1.1，即使服务器协商了 h2，也使用 HTTP/1.1 方式处理
 		logHTTP1("使用 HTTP/1.x 请求/响应解析模式")
 		p.handleHTTP1Tunnel(tlsConn, targetConn, hostname, ctx)
-	} else if targetConn != nil {
-		logTunnel("使用透明转发模式（支持 HTTP/2）")
+	} else if targetConn != nil && clientProtocol == "h2" {
+		// 客户端是 h2，但服务器不是 h2，使用透明转发（服务器会降级处理）
+		logTunnel("使用透明转发模式（客户端 HTTP/2）")
 		p.handleTransparentTunnel(tlsConn, targetConn)
 	} else {
 		// 延迟建立连接的情况，只处理 HTTP/1.1

@@ -16,6 +16,7 @@ import (
 	fastls "github.com/FastTLS/fastls"
 	utls "github.com/refraction-networking/utls"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
 )
 
 func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr string, forceProtocol string, requestConfig *RequestFingerprintConfig, parentProxy *url.URL) (net.Conn, error) {
@@ -96,6 +97,9 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 	}
 	if forceProtocol == "http/1.1" {
 		tlsConfig.NextProtos = []string{"http/1.1"}
+	} else {
+		// 默认优先使用 HTTP/2
+		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
 	}
 	conn := tls.Client(rawConn, tlsConfig)
 
@@ -136,6 +140,41 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 		}
 		logRequest(req.Method, targetURL, fingerprintInfo, proxyInfo)
 
+		// 检查是否有已存在的 HTTP/2 连接
+		if h2ClientConn, ok := ctx.Data["h2ClientConn"].(*http2.ClientConn); ok && h2ClientConn != nil {
+			// 使用现有的 HTTP/2 连接
+			modifiedReq := p.modifyRequestHeaders(req, hostname, requestConfig)
+			modifiedReq.URL.Scheme = "https"
+			modifiedReq.URL.Host = hostname
+			if modifiedReq.URL.Path == "" {
+				modifiedReq.URL.Path = "/"
+			}
+
+			resp, err := h2ClientConn.RoundTrip(modifiedReq)
+			if err != nil {
+				logError("HTTP/2 请求失败: %v", err)
+				delete(ctx.Data, "h2ClientConn")
+				return
+			}
+
+			if err := p.writeHTTP1Response(clientConn, resp); err != nil {
+				logError("写入客户端响应失败: %v", err)
+				resp.Body.Close()
+				return
+			}
+
+			statusText := http.StatusText(resp.StatusCode)
+			logResponse(req.Method, targetURL, resp.StatusCode, statusText, nil)
+
+			resp.Body.Close()
+			if !strings.EqualFold(req.Header.Get("Connection"), "keep-alive") {
+				h2ClientConn.Close()
+				delete(ctx.Data, "h2ClientConn")
+				return
+			}
+			continue
+		}
+
 		// 第一个请求且连接未建立时建立连接
 		if firstRequest && targetConn == nil {
 			// 从 Context 获取连接参数
@@ -171,6 +210,63 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			}
 			targetConn = newTargetConn
 			ctx.Data["targetConn"] = newTargetConn
+
+			// 检查服务器是否协商了 h2，如果是，使用 HTTP/2 客户端发送请求
+			var targetProtocol string
+			if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
+				targetProtocol = tlsTargetConn.ConnectionState().NegotiatedProtocol
+			} else if utlsConn, ok := targetConn.(*utls.UConn); ok {
+				targetProtocol = utlsConn.ConnectionState().NegotiatedProtocol
+			}
+
+			if targetProtocol == "h2" {
+				// 服务器协商了 h2，使用 HTTP/2 客户端发送请求
+				logHTTP2("服务器协商了 HTTP/2，使用 HTTP/2 客户端发送请求")
+				modifiedReq := p.modifyRequestHeaders(req, hostname, requestConfig)
+				modifiedReq.URL.Scheme = "https"
+				modifiedReq.URL.Host = hostname
+				if modifiedReq.URL.Path == "" {
+					modifiedReq.URL.Path = "/"
+				}
+
+				// 创建 HTTP/2 客户端连接
+				transport := &http2.Transport{}
+				h2ClientConn, err := transport.NewClientConn(targetConn)
+				if err != nil {
+					logError("创建 HTTP/2 客户端连接失败: %v，降级到 HTTP/1.1", err)
+					// 降级到 HTTP/1.1，继续执行后面的 HTTP/1.1 代码
+				} else {
+					// 使用 HTTP/2 发送请求
+					resp, err := h2ClientConn.RoundTrip(modifiedReq)
+					if err != nil {
+						logError("HTTP/2 请求失败: %v", err)
+						h2ClientConn.Close()
+						return
+					}
+
+					// 将 HTTP/2 响应转换为 HTTP/1.1 格式返回给客户端
+					if err := p.writeHTTP1Response(clientConn, resp); err != nil {
+						logError("写入客户端响应失败: %v", err)
+						resp.Body.Close()
+						h2ClientConn.Close()
+						return
+					}
+
+					// 记录响应日志
+					statusText := http.StatusText(resp.StatusCode)
+					logResponse(req.Method, targetURL, resp.StatusCode, statusText, nil)
+
+					resp.Body.Close()
+					// HTTP/2 连接可以复用，不需要关闭
+					if !strings.EqualFold(req.Header.Get("Connection"), "keep-alive") {
+						h2ClientConn.Close()
+						return
+					}
+					// 保存 HTTP/2 连接供后续请求使用
+					ctx.Data["h2ClientConn"] = h2ClientConn
+					continue
+				}
+			}
 		}
 		firstRequest = false
 
@@ -331,6 +427,39 @@ func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, req
 	}
 
 	return newReq
+}
+
+// writeHTTP1Response 将 HTTP/2 响应转换为 HTTP/1.1 格式并写入客户端连接
+func (p *MITMProxy) writeHTTP1Response(clientConn net.Conn, resp *http.Response) error {
+	// 写入状态行
+	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, resp.Status)
+	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
+		return err
+	}
+
+	// 写入响应头
+	for key, values := range resp.Header {
+		for _, value := range values {
+			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
+			if _, err := clientConn.Write([]byte(headerLine)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 写入空行分隔头部和正文
+	if _, err := clientConn.Write([]byte("\r\n")); err != nil {
+		return err
+	}
+
+	// 写入响应体
+	if resp.Body != nil {
+		if _, err := io.Copy(clientConn, resp.Body); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // dialThroughProxy 通过代理建立连接
