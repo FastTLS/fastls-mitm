@@ -38,7 +38,12 @@ def test_mitm_proxy():
         response = session.get(
             target_url,
             timeout=30,
-            cert=("./../mitm-ca-cert.pem", "./../mitm-ca-key.pem")
+            # cert=("./../mitm-ca-cert.pem", "./../mitm-ca-key.pem"),
+            verify=False,
+            headers={
+                "X-Mitm-Browser": "firefox",
+                "X-Mitm-Proxy": "http://127.0.0.1:10809"
+            }
         )
         
         print(f"状态码: {response.status_code}")
