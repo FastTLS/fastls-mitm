@@ -242,5 +242,5 @@ jobs:
           draft: false
           prerelease: ${{ steps.get_version.outputs.is_prerelease == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.SECRET_TOKEN }}
 
