@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
+	"net/url"
 
 	fastls "github.com/FastTLS/fastls"
 	"github.com/FastTLS/fastls/imitate"
@@ -33,6 +35,50 @@ func parseFingerprintFromHeaders(headers http.Header) *RequestFingerprintConfig 
 	}
 
 	return config
+}
+
+// parseProxyFromHeaders 从请求头中解析代理信息
+// 支持的请求头: X-Mitm-Proxy
+// 格式: http://proxy.example.com:8080 或 http://user:pass@proxy.example.com:8080
+func parseProxyFromHeaders(headers http.Header) (*url.URL, error) {
+	proxyStr := headers.Get("X-Mitm-Proxy")
+	if proxyStr == "" {
+		return nil, nil
+	}
+
+	proxyURL, err := url.Parse(proxyStr)
+	if err != nil {
+		return nil, fmt.Errorf("解析代理URL失败: %v", err)
+	}
+
+	// 确保是有效的代理URL
+	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" && proxyURL.Scheme != "socks5" {
+		return nil, fmt.Errorf("不支持的代理协议: %s (仅支持 http, https, socks5)", proxyURL.Scheme)
+	}
+
+	return proxyURL, nil
+}
+
+// formatFingerprintInfo 格式化指纹信息用于日志输出
+func formatFingerprintInfo(config *RequestFingerprintConfig) string {
+	if config == nil {
+		return ""
+	}
+
+	// 检查是否有任何指纹信息被设置
+	if config.JA3 != "" {
+		return fmt.Sprintf("JA3:%s", config.JA3)
+	}
+
+	if config.JA4R != "" {
+		return fmt.Sprintf("JA4R:%s", config.JA4R)
+	}
+
+	if config.Browser != "" {
+		return fmt.Sprintf("Browser:%s", config.Browser)
+	}
+
+	return ""
 }
 
 func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *RequestFingerprintConfig) (fastls.Fingerprint, string) {

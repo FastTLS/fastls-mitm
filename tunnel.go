@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,15 +18,25 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr string, forceProtocol string, requestConfig *RequestFingerprintConfig) (net.Conn, error) {
+func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr string, forceProtocol string, requestConfig *RequestFingerprintConfig, parentProxy *url.URL) (net.Conn, error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
 
-	rawConn, err := net.DialTimeout(network, addr, 30*time.Second)
-	if err != nil {
-		return nil, err
+	var rawConn net.Conn
+	if parentProxy != nil {
+		// 通过上级代理连接
+		rawConn, err = p.dialThroughProxy(ctx, network, addr, parentProxy)
+		if err != nil {
+			return nil, fmt.Errorf("通过上级代理连接失败: %v", err)
+		}
+	} else {
+		// 直接连接
+		rawConn, err = net.DialTimeout(network, addr, 30*time.Second)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	options := fastls.Options{
@@ -33,19 +44,12 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 	}
 	fingerprint, userAgent := p.applyImitateConfig(&options, requestConfig)
 
-	if p.fingerprint != nil && !p.fingerprint.IsEmpty() {
-		logrus.Infof("使用自定义指纹连接到: %s", host)
-	} else {
+	if fingerprint == nil || fingerprint.IsEmpty() {
 		browserType := p.browser
 		if browserType == "" {
 			browserType = "firefox"
 		}
-		logrus.Infof("使用浏览器指纹 (%s) 连接到: %s, UserAgent: %s", browserType, host, userAgent)
-		if fingerprint == nil || fingerprint.IsEmpty() {
-			logrus.Warnf("警告: 浏览器指纹 (%s) 未设置成功，将使用标准TLS", browserType)
-		} else {
-			logrus.Infof("指纹类型: %s, 指纹值: %s", fingerprint.Type(), fingerprint.Value())
-		}
+		logrus.Warnf("警告: 浏览器指纹 (%s) 未设置成功，将使用标准TLS", browserType)
 	}
 
 	if fingerprint != nil && !fingerprint.IsEmpty() {
@@ -103,8 +107,9 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 	return conn, nil
 }
 
-func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, hostname string) {
+func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, hostname string, ctx *Context) {
 	reader := bufio.NewReader(clientConn)
+	firstRequest := true
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
@@ -115,6 +120,56 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 		}
 
 		requestConfig := parseFingerprintFromHeaders(req.Header)
+
+		// 解析代理信息
+		headerProxy, _ := parseProxyFromHeaders(req.Header)
+		fingerprintInfo := formatFingerprintInfo(requestConfig)
+		proxyInfo := ""
+		if headerProxy != nil {
+			proxyInfo = headerProxy.String()
+		}
+
+		// 记录 HTTPS 请求日志（包含指纹和代理信息）
+		targetURL := fmt.Sprintf("https://%s%s", hostname, req.URL.Path)
+		if req.URL.RawQuery != "" {
+			targetURL += "?" + req.URL.RawQuery
+		}
+		logRequest(req.Method, targetURL, fingerprintInfo, proxyInfo)
+
+		// 如果是第一个请求，且连接未建立，则建立连接
+		if firstRequest && targetConn == nil {
+			// 从 Context 获取连接参数
+			host := ctx.Data["host"].(string)
+			forceProtocol := ctx.Data["forceProtocol"].(string)
+			oldRequestConfig := ctx.Data["requestConfig"].(*RequestFingerprintConfig)
+
+			// 优先使用请求头中的代理信息，如果没有则使用 Context 中保存的代理信息
+			proxyToUse := headerProxy
+			if proxyToUse == nil {
+				if savedProxy, ok := ctx.Data["parentProxy"].(*url.URL); ok && savedProxy != nil {
+					proxyToUse = savedProxy
+				}
+			}
+
+			if proxyToUse != nil {
+				logDebug("使用代理建立连接: %s", proxyToUse.String())
+			} else {
+				logDebug("直接建立连接（未使用代理）")
+			}
+
+			// 建立连接
+			ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			newTargetConn, err := p.dialTLSWithFingerprint(ctxTimeout, "tcp", host, forceProtocol, oldRequestConfig, proxyToUse)
+			cancel()
+			if err != nil {
+				logError("建立连接失败 %s: %v", host, err)
+				return
+			}
+			targetConn = newTargetConn
+			ctx.Data["targetConn"] = newTargetConn
+		}
+		firstRequest = false
+
 		modifiedReq := p.modifyRequestHeaders(req, hostname, requestConfig)
 
 		if err := modifiedReq.Write(targetConn); err != nil {
@@ -158,6 +213,10 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			}
 			return
 		}
+
+		// 记录响应日志
+		statusText := http.StatusText(resp.StatusCode)
+		logResponse(req.Method, targetURL, resp.StatusCode, statusText, nil)
 
 		if err := resp.Write(clientConn); err != nil {
 			logError("写入客户端响应失败: %v", err)
@@ -268,4 +327,36 @@ func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, req
 	}
 
 	return newReq
+}
+
+// dialThroughProxy 通过上级代理建立连接
+// 参考: https://github.com/ouqiang/goproxy
+func (p *MITMProxy) dialThroughProxy(ctx context.Context, network, addr string, proxyURL *url.URL) (net.Conn, error) {
+	// 连接到代理服务器
+	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("连接到代理服务器失败: %v", err)
+	}
+
+	// 发送 CONNECT 请求
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
+	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+		proxyConn.Close()
+		return nil, fmt.Errorf("发送CONNECT请求失败: %v", err)
+	}
+
+	// 读取响应
+	reader := bufio.NewReader(proxyConn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		proxyConn.Close()
+		return nil, fmt.Errorf("读取代理响应失败: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		proxyConn.Close()
+		return nil, fmt.Errorf("代理返回错误状态码: %d %s", resp.StatusCode, resp.Status)
+	}
+
+	return proxyConn, nil
 }

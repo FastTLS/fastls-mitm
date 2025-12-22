@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -17,27 +18,92 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// CertCache 证书缓存接口
+// 参考: https://github.com/ouqiang/goproxy
+type CertCache interface {
+	// Set 保存证书
+	Set(host string, cert *tls.Certificate)
+	// Get 获取证书
+	Get(host string) *tls.Certificate
+}
+
+// DefaultCertCache 默认的内存证书缓存实现
+type DefaultCertCache struct {
+	certCache map[string]*tls.Certificate
+	certMutex sync.RWMutex
+}
+
+func NewDefaultCertCache() *DefaultCertCache {
+	return &DefaultCertCache{
+		certCache: make(map[string]*tls.Certificate),
+	}
+}
+
+func (c *DefaultCertCache) Set(host string, cert *tls.Certificate) {
+	c.certMutex.Lock()
+	defer c.certMutex.Unlock()
+	c.certCache[host] = cert
+}
+
+func (c *DefaultCertCache) Get(host string) *tls.Certificate {
+	c.certMutex.RLock()
+	defer c.certMutex.RUnlock()
+	return c.certCache[host]
+}
+
 type MITMProxy struct {
 	caCert         *x509.Certificate
 	caKey          *rsa.PrivateKey
 	caCertPEM      []byte
 	caKeyPEM       []byte
 	server         *http.Server
-	certCache      map[string]*tls.Certificate
-	certMutex      sync.RWMutex
+	certCache      CertCache
 	fingerprint    fastls.Fingerprint
 	browser        string
 	listenAddr     string
 	disableConnect bool
+	delegate       Delegate
 }
 
+// NewMITMProxyOptions 创建 MITMProxy 的选项
+type NewMITMProxyOptions struct {
+	ListenAddr     string
+	Fingerprint    fastls.Fingerprint
+	Browser        string
+	DisableConnect bool
+	Delegate       Delegate
+	CertCache      CertCache
+}
+
+// NewMITMProxy 创建新的 MITM 代理服务器
 func NewMITMProxy(listenAddr string, fingerprint fastls.Fingerprint, browser string, disableConnect bool) (*MITMProxy, error) {
+	return NewMITMProxyWithOptions(NewMITMProxyOptions{
+		ListenAddr:     listenAddr,
+		Fingerprint:    fingerprint,
+		Browser:        browser,
+		DisableConnect: disableConnect,
+		Delegate:       &DefaultDelegate{},
+		CertCache:      NewDefaultCertCache(),
+	})
+}
+
+// NewMITMProxyWithOptions 使用选项创建新的 MITM 代理服务器
+// 参考: https://github.com/ouqiang/goproxy
+func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
+	if opts.Delegate == nil {
+		opts.Delegate = &DefaultDelegate{}
+	}
+	if opts.CertCache == nil {
+		opts.CertCache = NewDefaultCertCache()
+	}
+
 	proxy := &MITMProxy{
-		certCache:      make(map[string]*tls.Certificate),
-		listenAddr:     listenAddr,
-		fingerprint:    fingerprint,
-		browser:        browser,
-		disableConnect: disableConnect,
+		certCache:      opts.CertCache,
+		listenAddr:     opts.ListenAddr,
+		fingerprint:    opts.Fingerprint,
+		browser:        opts.Browser,
+		disableConnect: opts.DisableConnect,
+		delegate:       opts.Delegate,
 	}
 
 	if err := proxy.generateCA(); err != nil {
@@ -53,7 +119,28 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		host = r.URL.Host
 	}
 
-	logRequest("CONNECT", host)
+	// 创建上下文
+	ctx := NewContext(r)
+
+	// 调用 Delegate.Connect
+	p.delegate.Connect(ctx, w)
+
+	// 检查是否被中止
+	if ctx.Aborted {
+		return
+	}
+
+	// 解析指纹和代理信息（用于日志输出）
+	requestConfig := parseFingerprintFromHeaders(r.Header)
+	headerProxy, _ := parseProxyFromHeaders(r.Header)
+
+	fingerprintInfo := formatFingerprintInfo(requestConfig)
+	proxyInfo := ""
+	if headerProxy != nil {
+		proxyInfo = headerProxy.String()
+	}
+
+	logRequest("CONNECT", host, fingerprintInfo, proxyInfo)
 	logDebug("收到CONNECT请求: %s -> %s", r.RemoteAddr, host)
 
 	if p.disableConnect {
@@ -143,37 +230,86 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		logProtocol("强制目标服务器使用协议: %s", forceProtocol)
 	}
 
-	requestConfig := parseFingerprintFromHeaders(r.Header)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	targetConn, err := p.dialTLSWithFingerprint(ctx, "tcp", host, forceProtocol, requestConfig)
-	if err != nil {
-		logError("连接到目标服务器失败 %s: %v", host, err)
+	// 调用 Delegate.Auth
+	if !p.delegate.Auth(ctx, w) {
+		logResponse("CONNECT", host, http.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
+		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+		w.WriteHeader(http.StatusProxyAuthRequired)
 		return
 	}
-	defer targetConn.Close()
 
-	targetProtocol := ""
-	if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
-		targetProtocol = tlsTargetConn.ConnectionState().NegotiatedProtocol
-		logProtocol("目标服务器协商的协议: %s", targetProtocol)
+	// 调用 Delegate.BeforeRequest
+	p.delegate.BeforeRequest(ctx)
+
+	// 检查是否被中止
+	if ctx.Aborted {
+		return
 	}
 
-	if targetProtocol == "h2" {
+	// 如果请求头中没有代理信息，则从 Delegate 获取
+	var parentProxy *url.URL
+	if headerProxy != nil {
+		parentProxy = headerProxy
+		logDebug("使用请求头指定的代理: %s", parentProxy.String())
+	} else {
+		parentProxy, err = p.delegate.ParentProxy(r)
+		if err != nil {
+			logError("获取上级代理失败: %v", err)
+		}
+	}
+
+	// 如果 CONNECT 阶段没有代理信息，延迟建立连接，等到第一个 HTTPS 请求到达时再建立
+	// 这样可以获取 HTTPS 请求头中的代理信息
+	var targetConn net.Conn
+	if parentProxy == nil {
+		// 延迟建立连接，在 handleHTTP1Tunnel 中从第一个 HTTPS 请求获取代理信息
+		logDebug("CONNECT 阶段未检测到代理信息，延迟建立连接，等待第一个 HTTPS 请求")
+		targetConn = nil
+	} else {
+		// 立即建立连接
+		ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		targetConn, err = p.dialTLSWithFingerprint(ctxTimeout, "tcp", host, forceProtocol, requestConfig, parentProxy)
+		cancel()
+		if err != nil {
+			logError("连接到目标服务器失败 %s: %v", host, err)
+			return
+		}
+		defer targetConn.Close()
+	}
+
+	// 如果连接已建立，检查协议
+	targetProtocol := ""
+	if targetConn != nil {
+		if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
+			targetProtocol = tlsTargetConn.ConnectionState().NegotiatedProtocol
+			logProtocol("目标服务器协商的协议: %s", targetProtocol)
+		}
+	}
+
+	// 将连接信息存储到 Context 中，以便在 handleHTTP1Tunnel 中可以使用代理信息建立连接
+	ctx.Data["host"] = host
+	ctx.Data["forceProtocol"] = forceProtocol
+	ctx.Data["requestConfig"] = requestConfig
+	ctx.Data["targetConn"] = targetConn
+	ctx.Data["parentProxy"] = parentProxy
+
+	if targetConn != nil && targetProtocol == "h2" {
 		logHTTP2("检测到目标服务器使用 HTTP/2，切换到透明转发模式")
 		p.handleTransparentTunnel(tlsConn, targetConn)
 		return
 	}
 
 	if (clientProtocol == "" || clientProtocol == "http/1.1") &&
-		(targetProtocol == "" || targetProtocol == "http/1.1") {
+		(targetConn == nil || targetProtocol == "" || targetProtocol == "http/1.1") {
 		logHTTP1("使用 HTTP/1.x 请求/响应解析模式")
-		p.handleHTTP1Tunnel(tlsConn, targetConn, hostname)
-	} else {
+		p.handleHTTP1Tunnel(tlsConn, targetConn, hostname, ctx)
+	} else if targetConn != nil {
 		logTunnel("使用透明转发模式（支持 HTTP/2）")
 		p.handleTransparentTunnel(tlsConn, targetConn)
+	} else {
+		// 延迟建立连接的情况，只处理 HTTP/1.1
+		logHTTP1("使用 HTTP/1.x 请求/响应解析模式（延迟建立连接）")
+		p.handleHTTP1Tunnel(tlsConn, nil, hostname, ctx)
 	}
 }
 
@@ -185,6 +321,9 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// 创建上下文
+	ctx := NewContext(r)
 
 	targetURL := r.URL.String()
 	if r.URL.Scheme == "" {
@@ -204,14 +343,32 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logRequest(r.Method, targetURL)
-
+	// 解析指纹和代理信息（用于日志输出）
 	requestConfig := parseFingerprintFromHeaders(r.Header)
+	headerProxy, _ := parseProxyFromHeaders(r.Header)
+
+	fingerprintInfo := formatFingerprintInfo(requestConfig)
+	proxyInfo := ""
+	if headerProxy != nil {
+		proxyInfo = headerProxy.String()
+	}
+
+	logRequest(r.Method, targetURL, fingerprintInfo, proxyInfo)
+
+	// 调用 Delegate.Auth
+	if !p.delegate.Auth(ctx, w) {
+		logResponse(r.Method, targetURL, http.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
+		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+		w.WriteHeader(http.StatusProxyAuthRequired)
+		p.delegate.Finish(ctx)
+		return
+	}
 
 	req, err := http.NewRequest(r.Method, targetURL, r.Body)
 	if err != nil {
 		logError("创建请求失败: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		p.delegate.Finish(ctx)
 		return
 	}
 
@@ -224,9 +381,12 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	options := fastls.Options{
-		Timeout: 30,
-		Headers: make(map[string]string),
+	// 使用上下文中的 Options
+	if ctx.Options == nil {
+		ctx.Options = &fastls.Options{
+			Timeout: 30,
+			Headers: make(map[string]string),
+		}
 	}
 
 	for key, values := range r.Header {
@@ -234,30 +394,97 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if len(values) > 0 {
-			options.Headers[key] = values[0]
+			ctx.Options.Headers[key] = values[0]
 		}
 	}
 
-	p.applyImitateConfig(&options, requestConfig)
+	p.applyImitateConfig(ctx.Options, requestConfig)
+
+	// 调用 Delegate.BeforeRequest
+	p.delegate.BeforeRequest(ctx)
+
+	// 检查是否被中止
+	if ctx.Aborted {
+		p.delegate.Finish(ctx)
+		return
+	}
+
+	// 如果请求头中没有代理信息，则从 Delegate 获取
+	var parentProxy *url.URL
+	if headerProxy != nil {
+		parentProxy = headerProxy
+		logDebug("使用请求头指定的代理: %s", parentProxy.String())
+	} else {
+		parentProxy, err = p.delegate.ParentProxy(r)
+		if err != nil {
+			p.delegate.ErrorLog(err)
+		}
+	}
+
+	// 如果设置了上级代理，更新 Options
+	if parentProxy != nil {
+		ctx.Options.Proxy = parentProxy.String()
+	}
 
 	client := fastls.NewClient()
-	resp, err := client.Do(targetURL, options, r.Method)
+	resp, err := client.Do(targetURL, *ctx.Options, r.Method)
+
+	// 将 fastls.Response 转换为 http.Response（用于 BeforeResponse）
+	var httpResp *http.Response
+	if err == nil {
+		httpResp = &http.Response{
+			StatusCode: resp.Status,
+			Header:     make(http.Header),
+			Body:       resp.Body,
+		}
+		for k, v := range resp.Headers {
+			httpResp.Header.Set(k, v)
+		}
+	}
+
+	// 调用 Delegate.BeforeResponse
+	p.delegate.BeforeResponse(ctx, httpResp, err)
+
+	// 检查是否被中止
+	if ctx.Aborted {
+		if err == nil {
+			resp.Body.Close()
+		}
+		p.delegate.Finish(ctx)
+		return
+	}
+
 	if err != nil {
 		logResponse(r.Method, targetURL, http.StatusBadGateway, "Bad Gateway", err)
 		http.Error(w, err.Error(), http.StatusBadGateway)
+		p.delegate.Finish(ctx)
 		return
 	}
 	defer resp.Body.Close()
 
-	for key, value := range resp.Headers {
-		w.Header().Set(key, value)
+	// 使用修改后的响应
+	if httpResp != nil {
+		for key, values := range httpResp.Header {
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+		w.WriteHeader(httpResp.StatusCode)
+		statusText := http.StatusText(httpResp.StatusCode)
+		logResponse(r.Method, targetURL, httpResp.StatusCode, statusText, nil)
+		io.Copy(w, httpResp.Body)
+	} else {
+		for key, value := range resp.Headers {
+			w.Header().Set(key, value)
+		}
+		w.WriteHeader(resp.Status)
+		statusText := http.StatusText(resp.Status)
+		logResponse(r.Method, targetURL, resp.Status, statusText, nil)
+		io.Copy(w, resp.Body)
 	}
 
-	w.WriteHeader(resp.Status)
-	statusText := http.StatusText(resp.Status)
-	logResponse(r.Method, targetURL, resp.Status, statusText, nil)
-
-	io.Copy(w, resp.Body)
+	// 调用 Delegate.Finish
+	p.delegate.Finish(ctx)
 }
 
 func (p *MITMProxy) Start() error {

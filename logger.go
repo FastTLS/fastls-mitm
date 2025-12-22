@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -23,11 +24,30 @@ func setupLogging(debug bool) {
 	}
 }
 
-func logRequest(method, url string) {
-	logrus.WithFields(logrus.Fields{
+func logRequest(method, url string, fingerprintInfo ...string) {
+	fields := logrus.Fields{
 		"method": method,
 		"url":    url,
-	}).Info("HTTP请求")
+	}
+
+	var extraInfo []string
+
+	// 如果有指纹信息，添加到消息中（不在字段中重复）
+	if len(fingerprintInfo) > 0 && fingerprintInfo[0] != "" {
+		extraInfo = append(extraInfo, fmt.Sprintf("fingerprint=%s", fingerprintInfo[0]))
+	}
+
+	// 如果有代理信息，添加到消息中（不在字段中重复）
+	if len(fingerprintInfo) > 1 && fingerprintInfo[1] != "" {
+		extraInfo = append(extraInfo, fmt.Sprintf("proxy=%s", fingerprintInfo[1]))
+	}
+
+	msg := "HTTP请求"
+	if len(extraInfo) > 0 {
+		msg = fmt.Sprintf("HTTP请求 [%s]", strings.Join(extraInfo, ", "))
+	}
+
+	logrus.WithFields(fields).Info(msg)
 }
 
 func logResponse(method, url string, statusCode int, statusText string, err error) {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"flag"
-	"net/http"
 	"os"
 	"strings"
 
@@ -49,15 +48,12 @@ func main() {
 		fingerprint = fastls.Ja3Fingerprint{
 			FingerprintValue: *ja3,
 		}
-		logrus.Infof("使用自定义JA3指纹: %s", *ja3)
 	} else if *ja4r != "" {
 		fingerprint = fastls.Ja4Fingerprint{
 			FingerprintValue: *ja4r,
 		}
-		logrus.Infof("使用自定义JA4R指纹: %s", *ja4r)
 	} else {
 		browserType = *browser
-		logrus.Infof("使用浏览器指纹: %s", browserType)
 	}
 
 	proxy, err := NewMITMProxy(*listenAddr, fingerprint, browserType, *disableConnect)
@@ -79,4 +75,3 @@ func main() {
 		logrus.Fatalf("代理服务器启动失败: %v", err)
 	}
 }
-

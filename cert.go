@@ -91,17 +91,8 @@ func (p *MITMProxy) generateCA() error {
 }
 
 func (p *MITMProxy) getCertForHost(host string) (*tls.Certificate, error) {
-	p.certMutex.RLock()
-	if cert, ok := p.certCache[host]; ok {
-		p.certMutex.RUnlock()
-		return cert, nil
-	}
-	p.certMutex.RUnlock()
-
-	p.certMutex.Lock()
-	defer p.certMutex.Unlock()
-
-	if cert, ok := p.certCache[host]; ok {
+	// 先从缓存获取
+	if cert := p.certCache.Get(host); cert != nil {
 		return cert, nil
 	}
 
@@ -135,7 +126,8 @@ func (p *MITMProxy) getCertForHost(host string) (*tls.Certificate, error) {
 		PrivateKey:  key,
 	}
 
-	p.certCache[host] = cert
+	// 保存到缓存
+	p.certCache.Set(host, cert)
 
 	return cert, nil
 }
