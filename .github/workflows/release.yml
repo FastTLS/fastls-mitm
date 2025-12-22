@@ -53,17 +53,53 @@ jobs:
         with:
           repository: FastTLS/fastls
           path: workspace
+          fetch-depth: 0
 
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           path: workspace/services/fastls-mitm
+          fetch-depth: 0
 
       - name: Set up directory structure
+        shell: bash
         run: |
           # 验证目录结构
-          ls -la workspace
-          ls -la workspace/services/fastls-mitm
+          echo "检查父项目目录..."
+          if [ ! -d "workspace" ]; then
+            echo "错误: 父项目目录不存在"
+            exit 1
+          fi
+          echo "父项目目录内容:"
+          ls -la workspace || dir workspace
+          
+          echo "检查子项目目录..."
+          if [ ! -d "workspace/services/fastls-mitm" ]; then
+            echo "错误: 子项目目录不存在"
+            exit 1
+          fi
+          echo "子项目目录内容:"
+          ls -la workspace/services/fastls-mitm || dir workspace/services/fastls-mitm
+          
+          # 验证 go.mod 文件
+          echo "检查父项目 go.mod..."
+          if [ -f "workspace/go.mod" ]; then
+            echo "父项目 go.mod 存在"
+            head -5 workspace/go.mod
+          else
+            echo "错误: 父项目 go.mod 不存在"
+            exit 1
+          fi
+          
+          echo "检查子项目 go.mod..."
+          if [ -f "workspace/services/fastls-mitm/go.mod" ]; then
+            echo "子项目 go.mod 存在"
+            cat workspace/services/fastls-mitm/go.mod
+          else
+            echo "错误: 子项目 go.mod 不存在"
+            exit 1
+          fi
+          
           # 确保 go.mod 中的 replace 指令能够找到父项目
           # replace github.com/FastTLS/fastls => ../../ 应该指向 workspace/
 
@@ -275,6 +311,4 @@ jobs:
           files: release/*
           draft: false
           prerelease: ${{ steps.get_version.outputs.is_prerelease == 'true' }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.SECRET_TOKEN }}
 
