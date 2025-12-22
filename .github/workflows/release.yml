@@ -113,6 +113,7 @@ jobs:
         working-directory: workspace
         env:
           GOWORK: off
+        shell: bash
         run: |
           # 下载父项目的所有依赖
           echo "下载父项目依赖..."
@@ -143,7 +144,11 @@ jobs:
           # 显示 go.sum 文件信息
           if [ -f "go.sum" ]; then
             echo "go.sum 文件已更新:"
-            ls -lh go.sum
+            if command -v ls >/dev/null 2>&1; then
+              ls -lh go.sum 2>/dev/null || stat -f "%z bytes" go.sum 2>/dev/null || echo "文件大小: $(wc -c < go.sum) bytes"
+            else
+              echo "文件大小: $(wc -c < go.sum) bytes"
+            fi
             echo "go.sum 行数: $(wc -l < go.sum)"
           else
             echo "警告: go.sum 文件不存在"
@@ -152,6 +157,7 @@ jobs:
       - name: Get version from tag
         id: get_version
         if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -160,6 +166,7 @@ jobs:
       - name: Get version from input
         id: get_version_input
         if: github.event_name == 'workflow_dispatch'
+        shell: bash
         run: |
           echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
           echo "Version: ${{ github.event.inputs.version }}"
@@ -222,6 +229,7 @@ jobs:
 
       - name: Get version
         id: get_version
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ github.event.inputs.version }}"
@@ -245,6 +253,7 @@ jobs:
           path: artifacts
 
       - name: Prepare release assets
+        shell: bash
         run: |
           mkdir -p release
           cd artifacts
@@ -264,6 +273,7 @@ jobs:
           ls -lh
 
       - name: Create checksums
+        shell: bash
         run: |
           cd release
           for file in *; do
