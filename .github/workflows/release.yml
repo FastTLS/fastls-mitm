@@ -80,17 +80,37 @@ jobs:
           # 下载父项目的所有依赖
           echo "下载父项目依赖..."
           go mod download
-          # 尝试构建父项目以生成完整的 go.sum
-          echo "构建父项目以生成 go.sum..."
-          go build ./... 2>&1 || echo "构建完成（可能有一些错误，但 go.sum 应该已更新）"
+          
           # 整理依赖（这会更新 go.sum，确保包含所有间接依赖）
-          echo "整理依赖..."
+          echo "整理父项目依赖..."
           go mod tidy
-          # 再次下载确保所有依赖都在 go.sum 中
-          echo "再次下载依赖..."
+          
+          # 尝试构建父项目以生成完整的 go.sum
+          # 使用 -mod=readonly 避免修改 go.mod，但会生成 go.sum
+          echo "构建父项目以生成完整的 go.sum..."
+          go build -mod=readonly ./... 2>&1 | head -50 || true
+          
+          # 如果构建失败，尝试下载所有可能的依赖
+          echo "下载所有可能的依赖..."
+          go list -m -json all 2>&1 | head -20 || true
           go mod download
-          # 显示 go.sum 文件大小，确认已更新
-          ls -lh go.sum || echo "go.sum 文件不存在"
+          
+          # 再次整理依赖，确保 go.sum 包含所有构建时发现的依赖
+          echo "再次整理依赖..."
+          go mod tidy
+          
+          # 再次下载确保所有依赖都在 go.sum 中
+          echo "最终下载依赖..."
+          go mod download
+          
+          # 显示 go.sum 文件信息
+          if [ -f "go.sum" ]; then
+            echo "go.sum 文件已更新:"
+            ls -lh go.sum
+            echo "go.sum 行数: $(wc -l < go.sum)"
+          else
+            echo "警告: go.sum 文件不存在"
+          fi
 
       - name: Get version from tag
         id: get_version
@@ -116,16 +136,30 @@ jobs:
         shell: bash
         working-directory: workspace/services/fastls-mitm
         run: |
+          # 先下载所有依赖，确保 go.sum 完整
+          echo "下载子项目依赖..."
+          go mod download
+          
+          # 整理依赖以确保 go.sum 包含所有间接依赖
+          echo "整理子项目依赖..."
+          go mod tidy
+          
+          # 再次下载确保所有依赖都在 go.sum 中
+          echo "再次下载依赖..."
+          go mod download
+          
+          # 开始构建
           VERSION="${{ steps.get_version.outputs.version || steps.get_version_input.outputs.version || 'dev' }}"
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           COMMIT_SHA=${GITHUB_SHA::8}
           
           OUTPUT_NAME="fastls-mitm${{ matrix.ext }}"
           
+          echo "开始构建: $OUTPUT_NAME"
           go build -ldflags "-s -w -X 'main.version=$VERSION' -X 'main.buildTime=$BUILD_TIME' -X 'main.gitCommit=$COMMIT_SHA'" \
             -o "$OUTPUT_NAME" .
           
-          echo "Built: $OUTPUT_NAME"
+          echo "构建完成: $OUTPUT_NAME"
           if [ "${{ matrix.goos }}" = "windows" ]; then
             dir "$OUTPUT_NAME"
           else
