@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	version   = "beta1"
+	version   = "beta.2"
 	buildTime = "unknown"
 	gitCommit = "unknown"
 )
