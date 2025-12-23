@@ -402,6 +402,28 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	p.applyImitateConfig(ctx.Options, requestConfig)
 
+	// 优先使用请求头中的 HTTP2SettingsString，如果存在则覆盖
+	if requestConfig != nil && requestConfig.HTTP2SettingsString != "" {
+		ctx.Options.HTTP2SettingsString = requestConfig.HTTP2SettingsString
+		logDebug("使用请求头指定的 HTTP2SettingsString: %s", requestConfig.HTTP2SettingsString)
+	}
+
+	// 如果 HTTP2SettingsString 不为空，则解析并覆盖 HTTP2Settings 和 PHeaderOrderKeys
+	// 注意：虽然 fastls.NewClient().Do() 会调用 processRequest 来解析，但这里显式解析可以确保一致性
+	if ctx.Options.HTTP2SettingsString != "" {
+		h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
+		if err != nil {
+			logError("解析 HTTP2SettingsString 失败: %v", err)
+		} else {
+			// 覆盖 HTTP2Settings
+			ctx.Options.HTTP2Settings = fastls.ToHTTP2Settings(h2Settings)
+			// 如果解析出 PHeaderOrderKeys，则覆盖
+			if len(pHeaderOrderKeys) > 0 {
+				ctx.Options.PHeaderOrderKeys = pHeaderOrderKeys
+			}
+		}
+	}
+
 	// 调用 Delegate.BeforeRequest
 	p.delegate.BeforeRequest(ctx)
 

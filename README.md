@@ -359,6 +359,121 @@ req.on('error', (e) => {
 req.end();
 ```
 
+## 请求头配置
+
+MITM 代理支持通过请求头动态配置指纹和 HTTP/2 设置，优先级高于启动参数。
+
+### 支持的请求头
+
+| 请求头 | 说明 | 示例值 |
+|--------|------|--------|
+| `X-Mitm-Browser` | 浏览器类型 | `chrome142`, `firefox`, `safari` 等 |
+| `X-Mitm-Ja3` | 自定义 JA3 指纹字符串 | `771,4865-4866-4867,43-10-51-11-13-0-16-45,29-23-24,1` |
+| `X-Mitm-Ja4r` | 自定义 JA4R 指纹字符串 | `t13d1517h2_002f,0035,009c,009d,1301,1302,1303...` |
+| `X-Mitm-H2Settings` | HTTP/2 设置字符串 | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` |
+| `X-Mitm-Proxy` | 上级代理地址 | `http://127.0.0.1:10809` 或 `http://user:pass@proxy.com:8080` |
+
+### 优先级说明
+
+1. **请求头配置** > **启动参数配置** > **默认配置**
+2. 如果同时设置了多个指纹类型（JA3、JA4R、Browser），按优先级使用：**JA3 > JA4R > Browser**
+
+### HTTP/2 设置字符串格式
+
+`X-Mitm-H2Settings` 支持以下格式：
+
+```
+格式: "SETTINGS|ConnectionFlow|HeaderPriority|SettingsOrder||PHeaderOrderKeys"
+
+示例: "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+```
+
+**各部分说明**：
+- **SETTINGS**: HTTP/2 SETTINGS 帧设置，格式为 `ID:VALUE;ID:VALUE;...`
+  - 例如：`1:65536;2:0;4:6291456;6:262144` 表示：
+    - `1:65536` = HEADER_TABLE_SIZE: 65536
+    - `2:0` = ENABLE_PUSH: 0
+    - `4:6291456` = INITIAL_WINDOW_SIZE: 6291456
+    - `6:262144` = MAX_HEADER_LIST_SIZE: 262144
+- **ConnectionFlow**: 连接流控窗口大小，例如 `15663105`
+- **HeaderPriority**: 头部优先级设置
+  - 基础格式：`0`（只有 streamDep，会自动推断 weight 和 exclusive）
+  - 完整格式：`0:256:true`（streamDep:weight:exclusive）
+- **SettingsOrder**: SETTINGS 帧的顺序，用逗号分隔的字母，例如 `m,a,s,p`
+  - `m` = HEADER_TABLE_SIZE (1)
+  - `a` = ENABLE_PUSH (2)
+  - `s` = INITIAL_WINDOW_SIZE (4)
+  - `p` = MAX_HEADER_LIST_SIZE (6) 或 MAX_FRAME_SIZE (5)
+- **PHeaderOrderKeys**（可选）: 伪头部顺序，用逗号分隔，例如 `:method,:authority,:scheme,:path`
+  - 如果 SETTINGS 顺序为 `m,a,s,p`，会自动推导为 `:method,:authority,:scheme,:path`
+  - 如果顺序为 `m,s,a,p`（Safari），会自动推导为 `:method,:scheme,:authority,:path`
+
+**特殊设置**：
+- Safari 使用扩展设置 `9:1`（NO_RFC7540_PRIORITIES）
+- 示例：`2:0;3:100;4:2097152;9:1|10420225|0:256:false|m,s,a,p`
+
+### 使用示例
+
+#### curl 使用请求头配置
+
+```bash
+# 使用浏览器类型
+curl -x http://127.0.0.1:8888 -H "X-Mitm-Browser: chrome142" https://tls.peet.ws/api/all
+
+# 使用自定义 JA3 指纹
+curl -x http://127.0.0.1:8888 -H "X-Mitm-Ja3: 771,4865-4866-4867,43-10-51-11-13-0-16-45,29-23-24,1" https://tls.peet.ws/api/all
+
+# 使用自定义 HTTP/2 设置
+curl -x http://127.0.0.1:8888 -H "X-Mitm-H2Settings: 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p" https://tls.peet.ws/api/all
+
+# 组合使用多个配置
+curl -x http://127.0.0.1:8888 \
+  -H "X-Mitm-Browser: chrome142" \
+  -H "X-Mitm-H2Settings: 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p" \
+  -H "X-Mitm-Proxy: http://127.0.0.1:10809" \
+  https://tls.peet.ws/api/all
+```
+
+#### Python 使用请求头配置
+
+```python
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+proxy_url = "http://127.0.0.1:8888"
+session = requests.Session()
+session.proxies = {
+    "http": proxy_url,
+    "https": proxy_url
+}
+session.verify = False
+
+# 使用请求头配置指纹和 HTTP/2 设置
+headers = {
+    "X-Mitm-Browser": "chrome142",
+    "X-Mitm-H2Settings": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+}
+
+response = session.get("https://tls.peet.ws/api/all", headers=headers)
+print(response.text)
+```
+
+#### 使用上级代理
+
+```bash
+# 通过请求头指定上级代理
+curl -x http://127.0.0.1:8888 \
+  -H "X-Mitm-Proxy: http://127.0.0.1:10809" \
+  https://example.com
+
+# 带认证的上级代理
+curl -x http://127.0.0.1:8888 \
+  -H "X-Mitm-Proxy: http://user:pass@proxy.com:8080" \
+  https://example.com
+```
+
 ## 故障排除
 
 ### Windows curl 证书错误
@@ -381,9 +496,41 @@ req.end();
 2. 确保磁盘空间充足
 3. 查看日志输出获取详细错误信息
 
+## 高级功能
+
+### 资源管理
+
+MITM 代理会自动管理连接资源：
+
+- **客户端断开时自动清理**: 当客户端连接断开时，代理会自动关闭对应的服务端连接，避免资源泄漏
+- **HTTP/2 连接复用**: 支持 HTTP/2 连接复用，提高性能
+- **连接超时处理**: 自动处理连接超时和异常情况
+
+### HTTP/2 设置自动推导
+
+当使用 `X-Mitm-H2Settings` 时，如果 SETTINGS 顺序字符串包含 4 个字母且都是 `m,a,s,p` 的组合，会自动推导伪头部顺序：
+
+- `m,a,s,p` → `:method,:authority,:scheme,:path`（Chrome/Edge）
+- `m,s,a,p` → `:method,:scheme,:authority,:path`（Safari）
+- `m,p,a,s` → `:method,:path,:authority,:scheme`（Firefox）
+
+如果顺序字符串不符合上述模式，可以通过在字符串末尾添加 `||:method,:authority,:scheme,:path` 显式指定。
+
+### 扩展 HTTP/2 设置支持
+
+MITM 代理支持扩展的 HTTP/2 设置，例如 Safari 使用的 `NO_RFC7540_PRIORITIES`（设置 ID 9）：
+
+```
+示例: "2:0;3:100;4:2097152;9:1|10420225|0:256:false|m,s,a,p"
+```
+
+其中 `9:1` 表示 `NO_RFC7540_PRIORITIES` 设置为 1。
+
 ## 注意事项
 
 1. **安全警告**: MITM 代理会拦截和修改 HTTPS 流量，仅用于开发和测试环境
 2. **证书信任**: 必须将 CA 证书添加到系统信任的根证书颁发机构，否则会出现证书错误
 3. **性能影响**: MITM 代理会增加请求延迟，因为需要解密和重新加密流量
 4. **指纹伪造**: 代理服务器会使用指定的浏览器指纹连接到目标服务器，确保指纹正确性
+5. **连接管理**: 代理会自动管理连接生命周期，客户端断开时会自动清理服务端连接
+6. **HTTP/2 设置**: 通过 `X-Mitm-H2Settings` 配置的 HTTP/2 设置会覆盖浏览器默认配置，优先级最高

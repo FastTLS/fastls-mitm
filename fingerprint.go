@@ -10,10 +10,11 @@ import (
 )
 
 type RequestFingerprintConfig struct {
-	Browser  string
-	JA3      string
-	JA4R     string
-	Override bool
+	Browser             string
+	JA3                 string
+	JA4R                string
+	HTTP2SettingsString string
+	Override            bool
 }
 
 func parseFingerprintFromHeaders(headers http.Header) *RequestFingerprintConfig {
@@ -31,6 +32,11 @@ func parseFingerprintFromHeaders(headers http.Header) *RequestFingerprintConfig 
 
 	if ja4r := headers.Get("X-Mitm-Ja4r"); ja4r != "" {
 		config.JA4R = ja4r
+		config.Override = true
+	}
+
+	if http2SettingsString := headers.Get("X-Mitm-H2Settings"); http2SettingsString != "" {
+		config.HTTP2SettingsString = http2SettingsString
 		config.Override = true
 	}
 
