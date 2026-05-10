@@ -11,23 +11,24 @@ import (
 
 func main() {
 	var (
-		listenAddr     string
-		browser        string
-		ja3            string
-		ja4r           string
-		caCertPath     string
-		caKeyPath      string
-		disableConnect bool
-		debug          bool
-		showVersion    bool
-		showHelp       bool
+		listenAddr       string
+		browser          string
+		ja3              string
+		ja4r             string
+		caCertPath       string
+		caKeyPath        string
+		disableConnect   bool
+		verifyTargetCert bool
+		debug            bool
+		showVersion      bool
+		showHelp         bool
 	)
 
 	// 定义完整参数和缩写参数
 	flag.StringVar(&listenAddr, "addr", ":8888", "监听地址 (例如: :8888 或 0.0.0.0:8888)")
 	flag.StringVar(&listenAddr, "a", ":8888", "监听地址 (addr 的缩写)")
 
-	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome, chrome120, chrome142, chromium, edge, firefox, safari, opera)")
+	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome, chrome120, chrome142, chromium, edge, firefox(latest), firefox144, firefox147, firefox151, safari, opera)")
 	flag.StringVar(&browser, "b", "chrome142", "浏览器类型 (browser 的缩写)")
 
 	flag.StringVar(&ja3, "ja3", "", "自定义JA3指纹字符串 (如果指定，将忽略browser参数)")
@@ -44,6 +45,9 @@ func main() {
 
 	flag.BoolVar(&disableConnect, "disable-connect", false, "禁用 CONNECT 隧道请求，只支持 HTTP 代理方式")
 	flag.BoolVar(&disableConnect, "dc", false, "禁用 CONNECT 隧道请求 (disable-connect 的缩写)")
+
+	flag.BoolVar(&verifyTargetCert, "verify-cert", false, "验证目标服务器的 SSL 证书（默认不验证）")
+	flag.BoolVar(&verifyTargetCert, "vc", false, "验证目标服务器的 SSL 证书 (verify-cert 的缩写)")
 
 	flag.BoolVar(&debug, "debug", false, "启用 Debug 模式，显示详细的调试日志")
 	flag.BoolVar(&debug, "d", false, "启用 Debug 模式 (debug 的缩写)")
@@ -87,7 +91,15 @@ func main() {
 		browserType = browser
 	}
 
-	proxy, err := NewMITMProxy(listenAddr, fingerprint, browserType, disableConnect)
+	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{
+		ListenAddr:       listenAddr,
+		Fingerprint:      fingerprint,
+		Browser:          browserType,
+		DisableConnect:   disableConnect,
+		VerifyTargetCert: verifyTargetCert,
+		Delegate:         &DefaultDelegate{},
+		CertCache:        NewDefaultCertCache(),
+	})
 	if err != nil {
 		logrus.Fatalf("创建代理服务器失败: %v", err)
 	}
@@ -98,6 +110,11 @@ func main() {
 		logrus.Infof("  监听地址: %s", listenAddr)
 		logrus.Infof("  CA证书: %s", caCertPath)
 		logrus.Infof("  CA私钥: %s", caKeyPath)
+		if verifyTargetCert {
+			logrus.Infof("  目标服务器证书验证: 启用")
+		} else {
+			logrus.Infof("  目标服务器证书验证: 禁用（默认）")
+		}
 		logrus.Infof("  日志级别: Debug")
 		logrus.Info("=" + strings.Repeat("=", 60))
 	}

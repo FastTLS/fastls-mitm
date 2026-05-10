@@ -65,7 +65,7 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 		conn := utls.UClient(rawConn, &utls.Config{
 			ServerName:         host,
 			OmitEmptyPsk:       true,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: !p.verifyTargetCert,
 		}, utls.HelloCustom)
 
 		if forceProtocol == "http/1.1" {
@@ -95,7 +95,7 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 
 	tlsConfig := &tls.Config{
 		ServerName:         host,
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: !p.verifyTargetCert,
 	}
 	if forceProtocol == "http/1.1" {
 		tlsConfig.NextProtos = []string{"http/1.1"}

@@ -50,38 +50,41 @@ func (c *DefaultCertCache) Get(host string) *tls.Certificate {
 }
 
 type MITMProxy struct {
-	caCert         *x509.Certificate
-	caKey          *rsa.PrivateKey
-	caCertPEM      []byte
-	caKeyPEM       []byte
-	server         *http.Server
-	certCache      CertCache
-	fingerprint    fastls.Fingerprint
-	browser        string
-	listenAddr     string
-	disableConnect bool
-	delegate       Delegate
+	caCert           *x509.Certificate
+	caKey            *rsa.PrivateKey
+	caCertPEM        []byte
+	caKeyPEM         []byte
+	server           *http.Server
+	certCache        CertCache
+	fingerprint      fastls.Fingerprint
+	browser          string
+	listenAddr       string
+	disableConnect   bool
+	verifyTargetCert bool // 是否验证目标服务器证书
+	delegate         Delegate
 }
 
 // NewMITMProxyOptions MITMProxy 配置选项
 type NewMITMProxyOptions struct {
-	ListenAddr     string
-	Fingerprint    fastls.Fingerprint
-	Browser        string
-	DisableConnect bool
-	Delegate       Delegate
-	CertCache      CertCache
+	ListenAddr       string
+	Fingerprint      fastls.Fingerprint
+	Browser          string
+	DisableConnect   bool
+	VerifyTargetCert bool // 是否验证目标服务器证书
+	Delegate         Delegate
+	CertCache        CertCache
 }
 
 // NewMITMProxy 创建 MITM 代理服务器
 func NewMITMProxy(listenAddr string, fingerprint fastls.Fingerprint, browser string, disableConnect bool) (*MITMProxy, error) {
 	return NewMITMProxyWithOptions(NewMITMProxyOptions{
-		ListenAddr:     listenAddr,
-		Fingerprint:    fingerprint,
-		Browser:        browser,
-		DisableConnect: disableConnect,
-		Delegate:       &DefaultDelegate{},
-		CertCache:      NewDefaultCertCache(),
+		ListenAddr:       listenAddr,
+		Fingerprint:      fingerprint,
+		Browser:          browser,
+		DisableConnect:   disableConnect,
+		VerifyTargetCert: false, // 默认不验证目标服务器证书
+		Delegate:         &DefaultDelegate{},
+		CertCache:        NewDefaultCertCache(),
 	})
 }
 
@@ -95,12 +98,13 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 	}
 
 	proxy := &MITMProxy{
-		certCache:      opts.CertCache,
-		listenAddr:     opts.ListenAddr,
-		fingerprint:    opts.Fingerprint,
-		browser:        opts.Browser,
-		disableConnect: opts.DisableConnect,
-		delegate:       opts.Delegate,
+		certCache:        opts.CertCache,
+		listenAddr:       opts.ListenAddr,
+		fingerprint:      opts.Fingerprint,
+		browser:          opts.Browser,
+		disableConnect:   opts.DisableConnect,
+		verifyTargetCert: opts.VerifyTargetCert,
+		delegate:         opts.Delegate,
 	}
 
 	if err := proxy.generateCA(); err != nil {
@@ -221,9 +225,19 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientProtocol := tlsConn.ConnectionState().NegotiatedProtocol
 	logProtocol("客户端协商的协议: %s", clientProtocol)
 
-	// 不强制协议版本，让代理到服务端默认优先使用 HTTP/2
-	// 客户端到代理的协议版本不影响代理到服务端的协议选择
+	// 如果客户端使用 HTTP/1.1 或未协商协议，强制代理到服务器也使用 HTTP/1.1
+	// 这样可以避免服务器协商 HTTP/2 后，MITM 尝试使用 HTTP/2 失败导致的问题
 	forceProtocol := ""
+	if clientProtocol == "" || clientProtocol == "http/1.1" {
+		forceProtocol = "http/1.1"
+		logProtocol("客户端使用 HTTP/1.1，强制代理到服务器也使用 HTTP/1.1")
+	}
+
+	// 检查是否通过请求头强制使用 HTTP/1.1（优先级更高）
+	if r.Header.Get("X-Mitm-Force-HTTP11") == "true" {
+		forceProtocol = "http/1.1"
+		logProtocol("通过请求头强制使用 HTTP/1.1")
+	}
 
 	// 调用 Delegate.Auth
 	if !p.delegate.Auth(ctx, w) {
@@ -345,6 +359,12 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 检查目标 URL 的协议
+	targetScheme := ""
+	if parsedURL, err := url.Parse(targetURL); err == nil {
+		targetScheme = parsedURL.Scheme
+	}
+
 	// 解析指纹和代理信息
 	requestConfig := parseFingerprintFromHeaders(r.Header)
 	headerProxy, _ := parseProxyFromHeaders(r.Header)
@@ -400,12 +420,39 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	p.applyImitateConfig(ctx.Options, requestConfig)
+	// 只有 HTTPS 请求才应用指纹配置
+	// HTTP 请求不需要 TLS 指纹
+	if targetScheme == "https" {
+		p.applyImitateConfig(ctx.Options, requestConfig)
 
-	// 优先使用请求头中的 HTTP2SettingsString，如果存在则覆盖
-	if requestConfig != nil && requestConfig.HTTP2SettingsString != "" {
-		ctx.Options.HTTP2SettingsString = requestConfig.HTTP2SettingsString
-		logDebug("使用请求头指定的 HTTP2SettingsString: %s", requestConfig.HTTP2SettingsString)
+		// 优先使用请求头中的 HTTP2SettingsString，如果存在则覆盖
+		if requestConfig != nil && requestConfig.HTTP2SettingsString != "" {
+			ctx.Options.HTTP2SettingsString = requestConfig.HTTP2SettingsString
+			logDebug("使用请求头指定的 HTTP2SettingsString: %s", requestConfig.HTTP2SettingsString)
+		}
+
+		// 如果 HTTP2SettingsString 不为空，则解析并覆盖 HTTP2Settings 和 PHeaderOrderKeys
+		// 注意：虽然 fastls.NewClient().Do() 会调用 processRequest 来解析，但这里显式解析可以确保一致性
+		if ctx.Options.HTTP2SettingsString != "" {
+			h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
+			if err != nil {
+				logError("解析 HTTP2SettingsString 失败: %v", err)
+			} else {
+				// 覆盖 HTTP2Settings
+				ctx.Options.HTTP2Settings = fastls.ToHTTP2Settings(h2Settings)
+				// 如果解析出 PHeaderOrderKeys，则覆盖
+				if len(pHeaderOrderKeys) > 0 {
+					ctx.Options.PHeaderOrderKeys = pHeaderOrderKeys
+				}
+			}
+		}
+	} else {
+		// HTTP 请求：不设置指纹，让 fastls 使用标准库的 http.Client
+		// 只设置基本的 User-Agent（如果有）
+		if requestConfig != nil {
+			// 可以设置 User-Agent，但不设置指纹
+			logDebug("HTTP 请求，跳过指纹配置")
+		}
 	}
 
 	// 如果 HTTP2SettingsString 不为空，则解析并覆盖 HTTP2Settings 和 PHeaderOrderKeys
@@ -521,8 +568,19 @@ func (p *MITMProxy) Start() error {
 			return
 		}
 
-		if r.URL.Path == "/" && r.Method == http.MethodGet {
-			logDebug("收到代理测试请求，返回200 OK")
+		// 健康检查：只有当请求是直接访问代理服务器本身时才返回状态
+		// 判断条件：
+		// 1. URL 路径为 "/"
+		// 2. GET 方法
+		// 3. URL 中没有目标主机（r.URL.Host 为空），表示这是直接访问代理服务器
+		//    或者 Host 头等于代理服务器地址
+		// 注意：通过代理转发的请求，r.URL 会包含完整的 URL（如 http://localhost:8080/），
+		//      所以 r.URL.Host 不为空，不会匹配这个条件
+		isProxyHealthCheck := r.URL.Path == "/" && r.Method == http.MethodGet &&
+			(r.URL.Host == "" || r.Host == p.listenAddr)
+
+		if isProxyHealthCheck {
+			logDebug("收到代理健康检查请求，返回200 OK")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("Fastls MITM Proxy is running"))
 			return

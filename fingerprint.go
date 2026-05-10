@@ -140,6 +140,12 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 				imitate.Edge(options)
 			case "firefox":
 				imitate.Firefox(options)
+			case "firefox144":
+				imitate.Firefox144(options)
+			case "firefox147":
+				imitate.Firefox147(options)
+			case "firefox151":
+				imitate.Firefox(options)
 			case "safari":
 				imitate.Safari(options)
 			case "opera":
@@ -178,6 +184,12 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 		case "edge":
 			imitate.Edge(options)
 		case "firefox":
+			imitate.Firefox(options)
+		case "firefox144":
+			imitate.Firefox144(options)
+		case "firefox147":
+			imitate.Firefox147(options)
+		case "firefox151":
 			imitate.Firefox(options)
 		case "safari":
 			imitate.Safari(options)
