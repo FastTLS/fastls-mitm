@@ -3,6 +3,7 @@ name: Development artifacts
 on:
   push:
     branches: [main]
+    tags: ['v[0-9]*']
   workflow_dispatch:
 
 concurrency:
@@ -17,7 +18,7 @@ jobs:
     name: Build, attest and verify
     runs-on: ubuntu-24.04
     permissions:
-      contents: read
+      contents: write
       id-token: write
       attestations: write
       artifact-metadata: write
@@ -47,12 +48,16 @@ jobs:
           fi
           go test ./...
           go vet ./...
-      - name: Build development archives
+      - name: Build archives
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist staging
-          version="dev-${GITHUB_SHA::12}"
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="dev-${GITHUB_SHA::12}"
+          fi
           build_time="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           ldflags="-s -w -X main.version=${version} -X main.buildTime=${build_time} -X main.gitCommit=${GITHUB_SHA}"
 
@@ -99,9 +104,16 @@ jobs:
               --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/development-artifacts.yml"
           done
       - name: Upload development artifacts
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: fastls-mitm-development-${{ github.sha }}
           path: dist/
           retention-days: 14
           if-no-files-found: error
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --verify-tag --generate-notes --title "fastls-mitm ${GITHUB_REF_NAME}"

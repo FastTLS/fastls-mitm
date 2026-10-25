@@ -2,7 +2,7 @@
 
 中间人代理服务器，支持 TLS 指纹伪造。
 
-> 当前状态：开发阶段。仓库只生成带来源证明、保留 14 天的开发构建，不创建版本标签、GitHub Release 或正式发布包。
+> 当前状态：`v0.1.0` 正式版。正式产物只在 GitHub Releases 发布；其他软件包、镜像和应用商店不在发布范围内。
 
 文档导航：[详细代理说明](./MITM_PROXY.md) · [委托模式](./DELEGATE_EXAMPLE.md) · [客户端示例](./example/README.md) · [开发流程](./DEVELOPMENT.md) · [产物签发验证](./ARTIFACTS.md)
 
@@ -670,10 +670,10 @@ go vet ./...
 go build ./...
 ```
 
-CI 覆盖 Windows、Linux、macOS 与 Go 1.26.10/1.27.3，执行依赖策略、单元及真实 TLS/HTTP/2 交接测试、竞态检测、覆盖率、静态检查、全包构建和 CLI 冒烟测试。`main` 分支会构建六个平台开发包，生成 SHA-256 校验和与 Sigstore/GitHub 来源证明，并在上传前验证证明。
+CI 覆盖 Windows、Linux、macOS 与 Go 1.26.10/1.27.3，执行依赖策略、单元及真实 TLS/HTTP/2 交接测试、竞态检测、覆盖率、静态检查、全包构建和 CLI 冒烟测试。`main` 分支构建临时开发包；`v*` 标签生成六个平台正式包、SHA-256 校验和与 Sigstore/GitHub 来源证明，并只发布到 GitHub Releases。
 
 端到端测试只使用环回目标，并在临时目录生成独立 CA；覆盖普通 HTTP 转发、HTTPS CONNECT 解密、客户端 HTTP/1.1 到目标 HTTP/2 的协议交接、控制头剥离、证书签发链和 CONNECT 认证拒绝。CONNECT 在返回 `200 Connection Established` 前完成认证，拒绝时返回 `407`。
 
 测试套件还会现场构建并启动 `fastls-mitm`，使用临时 CA，通过真实代理端口验证 HTTP 与 HTTPS 请求；不会写入仓库证书或访问公网。
 
-完整开发门禁见 [DEVELOPMENT.md](./DEVELOPMENT.md)，下载和验证开发构建见 [ARTIFACTS.md](./ARTIFACTS.md)。
+完整门禁见 [DEVELOPMENT.md](./DEVELOPMENT.md)，下载和验证发布产物见 [ARTIFACTS.md](./ARTIFACTS.md)。
