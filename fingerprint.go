@@ -4,10 +4,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 
 	fastls "github.com/FastTLS/fastls"
-	"github.com/FastTLS/fastls/imitate"
+	fastlsimitate "github.com/FastTLS/fastls/imitate"
+	generators "github.com/FastTLS/imitate"
 )
+
+var fingerprintProvider = generators.New()
 
 type RequestFingerprintConfig struct {
 	Browser             string
@@ -127,31 +132,9 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 
 		if requestConfig.Browser != "" {
 			browserType := requestConfig.Browser
-			switch browserType {
-			case "chrome":
-				imitate.Chrome(options)
-			case "chrome120":
-				imitate.Chrome120(options)
-			case "chrome142":
-				imitate.Chrome142(options)
-			case "chromium":
-				imitate.Chromium(options)
-			case "edge":
-				imitate.Edge(options)
-			case "firefox":
-				imitate.Firefox(options)
-			case "firefox144":
-				imitate.Firefox144(options)
-			case "firefox147":
-				imitate.Firefox147(options)
-			case "firefox151":
-				imitate.Firefox(options)
-			case "safari":
-				imitate.Safari(options)
-			case "opera":
-				imitate.Opera(options)
-			default:
-				imitate.Firefox(options)
+			if err := applyBrowserProfile(options, browserType); err != nil {
+				logError("应用浏览器指纹失败: %v", err)
+				return nil, ""
 			}
 			fingerprint = options.Fingerprint
 			userAgent = options.UserAgent
@@ -172,31 +155,9 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 			browserType = "firefox"
 		}
 
-		switch browserType {
-		case "chrome":
-			imitate.Chrome(options)
-		case "chrome120":
-			imitate.Chrome120(options)
-		case "chrome142":
-			imitate.Chrome142(options)
-		case "chromium":
-			imitate.Chromium(options)
-		case "edge":
-			imitate.Edge(options)
-		case "firefox":
-			imitate.Firefox(options)
-		case "firefox144":
-			imitate.Firefox144(options)
-		case "firefox147":
-			imitate.Firefox147(options)
-		case "firefox151":
-			imitate.Firefox(options)
-		case "safari":
-			imitate.Safari(options)
-		case "opera":
-			imitate.Opera(options)
-		default:
-			imitate.Firefox(options)
+		if err := applyBrowserProfile(options, browserType); err != nil {
+			logError("应用默认浏览器指纹失败: %v", err)
+			return nil, ""
 		}
 
 		fingerprint = options.Fingerprint
@@ -208,4 +169,54 @@ func (p *MITMProxy) applyImitateConfig(options *fastls.Options, requestConfig *R
 	}
 
 	return fingerprint, userAgent
+}
+
+func applyBrowserProfile(options *fastls.Options, browser string) error {
+	_, err := fastlsimitate.Use(options, browserSelector(browser), fastlsimitate.WithProvider(fingerprintProvider))
+	return err
+}
+
+func browserSelector(browser string) string {
+	browser = strings.ToLower(strings.TrimSpace(browser))
+	selector := "firefox/158/windows"
+	if strings.HasPrefix(browser, "firefox") && browser != "firefox" {
+		if major, err := strconv.Atoi(strings.TrimPrefix(browser, "firefox")); err == nil &&
+			(major >= 151 && major <= 158 || major == 144 || major == 147 || major == 148) {
+			selector = fmt.Sprintf("firefox/%d/windows", major)
+		}
+	}
+	if strings.HasPrefix(browser, "chrome") && browser != "chrome" && browser != "chromium" {
+		if major, err := strconv.Atoi(strings.TrimPrefix(browser, "chrome")); err == nil &&
+			(major == 120 || major == 142 || major >= 150 && major <= 160) {
+			selector = fmt.Sprintf("chrome/%d/windows", major)
+		}
+	}
+	if strings.HasPrefix(browser, "edge") && browser != "edge" {
+		if major, err := strconv.Atoi(strings.TrimPrefix(browser, "edge")); err == nil && major >= 150 && major <= 160 {
+			selector = fmt.Sprintf("edge/%d/windows", major)
+		}
+	}
+	switch browser {
+	case "chrome":
+		selector = "chrome/160/windows"
+	case "chrome120":
+		selector = "chrome/120/windows"
+	case "chrome142":
+		selector = "chrome/142/windows"
+	case "chromium":
+		selector = "chromium/160/windows"
+	case "edge":
+		selector = "edge/160/windows"
+	case "firefox":
+		selector = "firefox/158/windows"
+	case "firefox144":
+		selector = "firefox/144/windows"
+	case "firefox147":
+		selector = "firefox/147/windows"
+	case "safari":
+		selector = "safari/18.7.3/ipados"
+	case "opera":
+		selector = "opera/145/windows"
+	}
+	return selector
 }
