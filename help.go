@@ -34,7 +34,7 @@ func printHelp() {
 	fmt.Printf("        显示此帮助信息并退出\n\n")
 	fmt.Printf("请求头配置 (X-Mitm-*):\n")
 	fmt.Printf("  可以通过请求头动态指定指纹配置，优先级高于启动参数:\n")
-	fmt.Printf("  X-Mitm-Browser:     浏览器类型 (chrome, chrome120, chrome142, chromium, edge, firefox(latest), firefox144, firefox147, firefox151, safari, opera)\n")
+	fmt.Printf("  X-Mitm-Browser:     浏览器类型 (chrome/chrome160(latest), chrome150..chrome160, chrome120, chrome142, chromium, edge/edge160(latest), edge150..edge160, firefox/firefox158(latest), firefox151..firefox158, firefox144/147/148, safari, opera)\n")
 	fmt.Printf("  X-Mitm-Ja3:         JA3指纹字符串\n")
 	fmt.Printf("  X-Mitm-Ja4r:        JA4R指纹字符串\n")
 	fmt.Printf("  X-Mitm-H2Settings:  HTTP/2设置字符串 (格式: SETTINGS|ConnectionFlow|HeaderPriority|SettingsOrder)\n")

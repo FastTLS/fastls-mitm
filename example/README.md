@@ -5,10 +5,10 @@
 ## 启动MITM代理
 
 ```bash
-cd services/fastls-mitm
-go run mitm_proxy.go -addr :8888 -browser chrome142
+cd fastls-mitm
+go run . -addr :8888 -browser chrome142
 # 或
-./mitm_proxy.exe -addr :8888 -browser chrome142
+./fastls-mitm.exe -addr :8888 -browser chrome142
 ```
 
 代理默认运行在 `http://127.0.0.1:8888`
@@ -132,14 +132,9 @@ axios.get('https://example.com', {
 
 ## 支持的浏览器类型
 
-- `chrome` - Chrome浏览器
-- `chrome120` - Chrome 120版本
-- `chrome142` - Chrome 142版本
-- `chromium` - Chromium浏览器
-- `edge` - Microsoft Edge浏览器
-- `firefox` - Firefox浏览器
-- `safari` - Safari浏览器
-- `opera` - Opera浏览器
+- 滚动别名：`chrome`、`edge`、`firefox`、`chromium`、`safari`、`opera`
+- 版本选择器：`chrome150`…`chrome160`、`edge150`…`edge160`、`firefox151`…`firefox158`
+- 兼容保留：`chrome120`、`chrome142`、`firefox144`、`firefox147`、`firefox148`
 
 ## 注意事项
 
