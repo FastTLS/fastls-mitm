@@ -54,6 +54,8 @@ type MITMProxy struct {
 	caKey            *rsa.PrivateKey
 	caCertPEM        []byte
 	caKeyPEM         []byte
+	caCertPath       string
+	caKeyPath        string
 	server           *http.Server
 	certCache        CertCache
 	fingerprint      fastls.Fingerprint
@@ -73,6 +75,10 @@ type NewMITMProxyOptions struct {
 	VerifyTargetCert bool // 是否验证目标服务器证书
 	Delegate         Delegate
 	CertCache        CertCache
+	// CACertPath and CAKeyPath override the default on-disk CA paths. They are
+	// primarily useful for isolated development and test instances.
+	CACertPath string
+	CAKeyPath  string
 }
 
 // NewMITMProxy 创建 MITM 代理服务器
@@ -105,6 +111,8 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 		disableConnect:   opts.DisableConnect,
 		verifyTargetCert: opts.VerifyTargetCert,
 		delegate:         opts.Delegate,
+		caCertPath:       opts.CACertPath,
+		caKeyPath:        opts.CAKeyPath,
 	}
 
 	if err := proxy.generateCA(); err != nil {
@@ -122,12 +130,22 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// 创建上下文
 	ctx := NewContext(r)
+	defer p.delegate.Finish(ctx)
 
 	// 调用 Delegate.Connect
 	p.delegate.Connect(ctx, w)
 
 	// 检查是否中止
 	if ctx.Aborted {
+		return
+	}
+
+	// CONNECT authentication must happen before hijacking and before sending
+	// 200 Connection Established; otherwise a 407 response cannot reach the client.
+	if !p.delegate.Auth(ctx, w) {
+		logResponse("CONNECT", host, http.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
+		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
+		w.WriteHeader(http.StatusProxyAuthRequired)
 		return
 	}
 
@@ -237,14 +255,6 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("X-Mitm-Force-HTTP11") == "true" {
 		forceProtocol = "http/1.1"
 		logProtocol("通过请求头强制使用 HTTP/1.1")
-	}
-
-	// 调用 Delegate.Auth
-	if !p.delegate.Auth(ctx, w) {
-		logResponse("CONNECT", host, http.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
-		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
-		w.WriteHeader(http.StatusProxyAuthRequired)
-		return
 	}
 
 	// 调用 Delegate.BeforeRequest
@@ -498,7 +508,11 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := fastls.NewClient()
-	resp, err := client.Do(targetURL, *ctx.Options, r.Method)
+	resp, err := client.DoContext(r.Context(), targetURL, *ctx.Options, r.Method)
+	defer resp.Client.CloseIdleConnections()
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
 
 	// 将 fastls.Response 转换为 http.Response
 	var httpResp *http.Response
@@ -531,8 +545,6 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.delegate.Finish(ctx)
 		return
 	}
-	defer resp.Body.Close()
-
 	// 使用修改后的响应
 	if httpResp != nil {
 		for key, values := range httpResp.Header {
@@ -558,8 +570,8 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	p.delegate.Finish(ctx)
 }
 
-func (p *MITMProxy) Start() error {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func (p *MITMProxy) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		logDebug("收到请求: %s %s (Method: %s, Host: %s, URL: %s)", r.Method, r.URL.Path, r.Method, r.Host, r.URL.String())
 
 		if r.Method == http.MethodConnect {
@@ -588,10 +600,13 @@ func (p *MITMProxy) Start() error {
 
 		p.handleHTTP(w, r)
 	})
+}
+
+func (p *MITMProxy) Start() error {
 
 	p.server = &http.Server{
 		Addr:    p.listenAddr,
-		Handler: handler,
+		Handler: p.handler(),
 	}
 
 	logrus.Infof("代理服务器启动在 %s", p.listenAddr)

@@ -663,4 +663,6 @@ go build ./...
 
 CI 覆盖 Windows、Linux、macOS 与 Go 1.26.10/1.27.3，执行依赖策略、单元及真实 TLS/HTTP/2 交接测试、竞态检测、覆盖率、静态检查、全包构建和 CLI 冒烟测试。`main` 分支会构建六个平台开发包，生成 SHA-256 校验和与 Sigstore/GitHub 来源证明，并在上传前验证证明。
 
+端到端测试只使用环回目标，并在临时目录生成独立 CA；覆盖普通 HTTP 转发、HTTPS CONNECT 解密、控制头剥离、证书签发链和 CONNECT 认证拒绝。CONNECT 在返回 `200 Connection Established` 前完成认证，拒绝时返回 `407`。
+
 完整开发门禁见 [DEVELOPMENT.md](./DEVELOPMENT.md)，下载和验证开发构建见 [ARTIFACTS.md](./ARTIFACTS.md)。

@@ -16,8 +16,14 @@ import (
 )
 
 func (p *MITMProxy) generateCA() error {
-	caCertPath := "mitm-ca-cert.pem"
-	caKeyPath := "mitm-ca-key.pem"
+	caCertPath := p.caCertPath
+	if caCertPath == "" {
+		caCertPath = "mitm-ca-cert.pem"
+	}
+	caKeyPath := p.caKeyPath
+	if caKeyPath == "" {
+		caKeyPath = "mitm-ca-key.pem"
+	}
 
 	if certData, err := os.ReadFile(caCertPath); err == nil {
 		if keyData, err := os.ReadFile(caKeyPath); err == nil {
