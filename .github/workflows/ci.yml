@@ -1,0 +1,50 @@
+name: Go tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Go ${{ matrix.go }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15]
+        go: ['1.26.10', '1.27.3']
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+      - name: Verify standalone dependency graph
+        shell: bash
+        env:
+          GOWORK: 'off'
+        run: |
+          go mod verify
+          if go mod graph | grep -F 'github.com/FastTLS/fhttp'; then
+            echo 'legacy fhttp dependency remains in the module graph' >&2
+            exit 1
+          fi
+      - name: Test
+        env:
+          GOWORK: 'off'
+        run: go test ./...
+      - name: Vet
+        env:
+          GOWORK: 'off'
+        run: go vet ./...
+      - name: Race test
+        if: matrix.os == 'ubuntu-24.04' && matrix.go == '1.26.10'
+        env:
+          GOWORK: 'off'
+        run: go test -race ./...

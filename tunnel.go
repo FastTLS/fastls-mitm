@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -15,8 +14,7 @@ import (
 	"time"
 
 	fastls "github.com/FastTLS/fastls"
-	fhttp "github.com/FastTLS/fhttp"
-	http2 "github.com/FastTLS/fhttp/http2"
+	"github.com/FastTLS/ftransport"
 	utls "github.com/refraction-networking/utls"
 	"github.com/sirupsen/logrus"
 )
@@ -124,9 +122,9 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			delete(ctx.Data, "targetConn")
 		}
 		// 关闭 HTTP/2 连接（如果存在）
-		if h2ClientConn, ok := ctx.Data["h2ClientConn"].(*http2.ClientConn); ok && h2ClientConn != nil {
-			h2ClientConn.Close()
-			delete(ctx.Data, "h2ClientConn")
+		if h2Transport, ok := ctx.Data["h2Transport"].(*ftransport.Transport); ok && h2Transport != nil {
+			_ = h2Transport.Close()
+			delete(ctx.Data, "h2Transport")
 		}
 	}()
 
@@ -160,7 +158,7 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 		logRequest(req.Method, targetURL, fingerprintInfo, proxyInfo)
 
 		// 检查是否有已存在的 HTTP/2 连接
-		if h2ClientConn, ok := ctx.Data["h2ClientConn"].(*http2.ClientConn); ok && h2ClientConn != nil {
+		if h2Transport, ok := ctx.Data["h2Transport"].(*ftransport.Transport); ok && h2Transport != nil {
 			// 使用现有的 HTTP/2 连接
 			modifiedReq, headerOrder, pHeaderOrder, _ := p.modifyRequestHeaders(req, hostname, requestConfig)
 			modifiedReq.URL.Scheme = "https"
@@ -169,25 +167,16 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 				modifiedReq.URL.Path = "/"
 			}
 
-			// 转换为 fhttp.Request
-			freq, err := p.convertToFHTTPRequest(modifiedReq, headerOrder, pHeaderOrder)
+			prepared, err := withRequestOrder(modifiedReq, headerOrder, pHeaderOrder)
 			if err != nil {
-				logError("转换请求失败: %v", err)
+				logError("应用请求顺序失败: %v", err)
 				return
 			}
 
-			fresp, err := h2ClientConn.RoundTrip(freq)
+			resp, err := h2Transport.RoundTrip(prepared)
 			if err != nil {
 				logError("HTTP/2 请求失败: %v", err)
-				delete(ctx.Data, "h2ClientConn")
-				return
-			}
-
-			// 转换为标准库的 Response
-			resp, err := p.convertToHTTPResponse(fresp)
-			if err != nil {
-				logError("转换响应失败: %v", err)
-				fresp.Body.Close()
+				delete(ctx.Data, "h2Transport")
 				return
 			}
 
@@ -202,8 +191,8 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 
 			resp.Body.Close()
 			if !strings.EqualFold(req.Header.Get("Connection"), "keep-alive") {
-				h2ClientConn.Close()
-				delete(ctx.Data, "h2ClientConn")
+				_ = h2Transport.Close()
+				delete(ctx.Data, "h2Transport")
 				return
 			}
 			continue
@@ -264,39 +253,27 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 					modifiedReq.URL.Path = "/"
 				}
 
-				// 创建 HTTP/2 客户端连接，使用 fhttp/http2 以支持自定义 HTTP2Settings
-				transport := &http2.Transport{
-					HTTP2Settings: h2Settings,
-				}
-				h2ClientConn, err := transport.NewClientConn(targetConn)
+				// 将已经完成指纹 TLS 握手的连接交给 ftransport。
+				h2Transport, err := newHTTP2Transport(targetConn, h2Settings)
 				if err != nil {
-					logError("创建 HTTP/2 客户端连接失败: %v，降级到 HTTP/1.1", err)
-					// 降级到 HTTP/1.1，继续执行后面的 HTTP/1.1 代码
+					logError("创建 HTTP/2 客户端连接失败: %v", err)
+					return
 				} else {
-					// 转换为 fhttp.Request
-					freq, err := p.convertToFHTTPRequest(modifiedReq, headerOrder, pHeaderOrder)
+					ctx.Data["h2Transport"] = h2Transport
+					delete(ctx.Data, "targetConn")
+					targetConn = nil
+
+					prepared, err := withRequestOrder(modifiedReq, headerOrder, pHeaderOrder)
 					if err != nil {
-						logError("转换请求失败: %v", err)
-						h2ClientConn.Close()
+						logError("应用请求顺序失败: %v", err)
 						// 客户端连接可能已断开，defer 会关闭服务端连接
 						return
 					}
 
 					// 使用 HTTP/2 发送请求
-					fresp, err := h2ClientConn.RoundTrip(freq)
+					resp, err := h2Transport.RoundTrip(prepared)
 					if err != nil {
 						logError("HTTP/2 请求失败: %v", err)
-						h2ClientConn.Close()
-						// 客户端连接可能已断开，defer 会关闭服务端连接
-						return
-					}
-
-					// 转换为标准库的 Response
-					resp, err := p.convertToHTTPResponse(fresp)
-					if err != nil {
-						logError("转换响应失败: %v", err)
-						fresp.Body.Close()
-						h2ClientConn.Close()
 						// 客户端连接可能已断开，defer 会关闭服务端连接
 						return
 					}
@@ -305,7 +282,6 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 					if err := p.writeHTTP1Response(clientConn, resp); err != nil {
 						logError("写入客户端响应失败: %v", err)
 						resp.Body.Close()
-						h2ClientConn.Close()
 						// 客户端连接已断开，defer 会关闭服务端连接
 						return
 					}
@@ -317,11 +293,10 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 					resp.Body.Close()
 					// HTTP/2 连接可以复用，不需要关闭
 					if !strings.EqualFold(req.Header.Get("Connection"), "keep-alive") {
-						h2ClientConn.Close()
+						_ = h2Transport.Close()
+						delete(ctx.Data, "h2Transport")
 						return
 					}
-					// 保存 HTTP/2 连接供后续请求使用
-					ctx.Data["h2ClientConn"] = h2ClientConn
 					continue
 				}
 			}
@@ -444,7 +419,7 @@ func (p *MITMProxy) handleTransparentTunnel(clientConn net.Conn, targetConn net.
 	closeConnections()
 }
 
-func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, requestConfig *RequestFingerprintConfig) (*http.Request, []string, []string, *http2.HTTP2Settings) {
+func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, requestConfig *RequestFingerprintConfig) (*http.Request, []string, []string, *ftransport.HTTP2Config) {
 	options := fastls.Options{
 		Timeout: 30,
 		Headers: make(map[string]string),
@@ -501,7 +476,7 @@ func (p *MITMProxy) modifyRequestHeaders(req *http.Request, hostname string, req
 	}
 
 	// 保存 HTTP/2 设置
-	var h2Settings *http2.HTTP2Settings
+	var h2Settings *ftransport.HTTP2Config
 	if options.HTTP2Settings != nil {
 		h2Settings = options.HTTP2Settings
 	}
@@ -638,68 +613,48 @@ func (p *MITMProxy) writeRequestWithHeaderOrder(req *http.Request, w io.Writer, 
 	return nil
 }
 
-// convertToFHTTPRequest 将标准库的 http.Request 转换为 fhttp.Request
-func (p *MITMProxy) convertToFHTTPRequest(req *http.Request, headerOrder []string, pHeaderOrder []string) (*fhttp.Request, error) {
-	freq, err := fhttp.NewRequest(req.Method, req.URL.String(), req.Body)
-	if err != nil {
-		return nil, err
+func withRequestOrder(req *http.Request, headerOrder, pseudoOrder []string) (*http.Request, error) {
+	pseudo := make([]ftransport.PseudoHeader, len(pseudoOrder))
+	for i, name := range pseudoOrder {
+		pseudo[i] = ftransport.PseudoHeader(name)
 	}
-
-	// 设置头部排序信息（包括普通头部和伪头部）
-	freq.Header = fhttp.Header{}
-	if headerOrder != nil {
-		freq.Header[fhttp.HeaderOrderKey] = headerOrder
-	}
-	if pHeaderOrder != nil {
-		freq.Header[fhttp.PHeaderOrderKey] = pHeaderOrder
-	}
-
-	// 复制请求头
-	for key, values := range req.Header {
-		for _, value := range values {
-			freq.Header.Add(key, value)
-		}
-	}
-
-	freq.URL = req.URL
-	freq.ContentLength = req.ContentLength
-	return freq, nil
+	return ftransport.WithRequestOptions(req, ftransport.RequestOptions{
+		HeaderOrder:       headerOrder,
+		PseudoHeaderOrder: pseudo,
+	})
 }
 
-// convertToHTTPResponse 将 fhttp.Response 转换为标准库的 http.Response
-func (p *MITMProxy) convertToHTTPResponse(fresp *fhttp.Response) (*http.Response, error) {
-	// 读取响应体
-	bodyBytes, err := io.ReadAll(fresp.Body)
-	if err != nil {
-		return nil, err
+func newHTTP2Transport(conn net.Conn, settings *ftransport.HTTP2Config) (*ftransport.Transport, error) {
+	config := ftransport.Config{Protocols: []ftransport.Protocol{ftransport.ProtocolHTTP2}}
+	if settings != nil {
+		config.HTTP2 = *settings
 	}
-	fresp.Body.Close()
-
-	// 创建标准库的 Response
-	resp := &http.Response{
-		Status:     fresp.Status,
-		StatusCode: fresp.StatusCode,
-		Proto:      fresp.Proto,
-		ProtoMajor: fresp.ProtoMajor,
-		ProtoMinor: fresp.ProtoMinor,
-		Header:     make(http.Header),
-		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
-	}
-
-	// 复制响应头
-	for key, values := range fresp.Header {
-		for _, value := range values {
-			resp.Header.Add(key, value)
+	var mu sync.Mutex
+	claimed := false
+	config.DialContext = func(ctx context.Context, request ftransport.DialRequest) (ftransport.DialResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return ftransport.DialResult{}, err
 		}
+		if !request.TLS || claimed {
+			return ftransport.DialResult{}, fmt.Errorf("unexpected HTTP/2 connection request")
+		}
+		claimed = true
+		state := &tls.ConnectionState{
+			HandshakeComplete:          true,
+			NegotiatedProtocol:         "h2",
+			NegotiatedProtocolIsMutual: true,
+		}
+		return ftransport.DialResult{Conn: conn, NegotiatedProtocol: "h2", TLSState: state}, nil
 	}
-
-	return resp, nil
+	return ftransport.NewTransport(config)
 }
 
 // writeHTTP1Response 将 HTTP/2 响应转换为 HTTP/1.1 格式并写入客户端连接
 func (p *MITMProxy) writeHTTP1Response(clientConn net.Conn, resp *http.Response) error {
 	// 写入状态行
-	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, resp.Status)
+	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
 	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
 		return err
 	}
