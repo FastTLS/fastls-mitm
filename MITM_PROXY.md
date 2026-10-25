@@ -61,6 +61,8 @@ go build -o fastls-mitm.exe .
 - `mitm-ca-cert.pem` - CA根证书
 - `mitm-ca-key.pem` - CA私钥（请妥善保管）
 
+`-ca-cert` 与 `-ca-key` 会传入实际代理实例。两者必须同时存在并匹配；损坏、非 CA、自签名校验失败或密钥不匹配时，程序拒绝启动，不会静默生成替代文件。
+
 **Windows:**
 1. 双击 `mitm-ca-cert.pem` 文件
 2. 点击"安装证书"
@@ -125,6 +127,7 @@ export https_proxy=http://127.0.0.1:8888
 3. **证书缓存**: 生成的证书会被缓存，避免重复生成
 4. **TLS指纹**: 连接到目标服务器时使用指定的TLS指纹
 5. **双向转发**: 在客户端和目标服务器之间双向转发数据
+6. **生命周期**: Ctrl+C、SIGINT 或 SIGTERM 会触发安全停止，并关闭活动 CONNECT 隧道
 
 ## 注意事项
 
@@ -166,6 +169,8 @@ export https_proxy=http://127.0.0.1:8888
 - 证书生成日志
 - 连接日志
 - 错误信息
+
+上级代理 URL 的认证信息会在日志中脱敏。动态 `X-Mitm-Proxy` 支持 HTTP、HTTPS 和 SOCKS5；HTTP/HTTPS 使用 CONNECT，三种协议均支持 URL 用户名/密码认证。
 
 ## 技术细节
 

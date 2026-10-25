@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +18,7 @@ import (
 	"github.com/FastTLS/ftransport"
 	utls "github.com/refraction-networking/utls"
 	"github.com/sirupsen/logrus"
+	xproxy "golang.org/x/net/proxy"
 )
 
 func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr string, forceProtocol string, requestConfig *RequestFingerprintConfig, parentProxy *url.URL) (net.Conn, error) {
@@ -30,11 +32,11 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 		// 通过代理连接
 		rawConn, err = p.dialThroughProxy(ctx, network, addr, parentProxy)
 		if err != nil {
-			return nil, fmt.Errorf("通过代理连接失败: %v", err)
+			return nil, fmt.Errorf("通过代理连接失败: %w", err)
 		}
 	} else {
 		// 直连
-		rawConn, err = net.DialTimeout(network, addr, 30*time.Second)
+		rawConn, err = (&net.Dialer{Timeout: 30 * time.Second}).DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}
@@ -83,9 +85,9 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 			return nil, fmt.Errorf("应用TLS预设失败: %v", err)
 		}
 
-		if err := conn.Handshake(); err != nil {
+		if err := conn.HandshakeContext(ctx); err != nil {
 			conn.Close()
-			return nil, fmt.Errorf("TLS握手失败: %v", err)
+			return nil, fmt.Errorf("TLS握手失败: %w", err)
 		}
 
 		return conn, nil
@@ -103,9 +105,9 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 	}
 	conn := tls.Client(rawConn, tlsConfig)
 
-	if err := conn.Handshake(); err != nil {
+	if err := conn.HandshakeContext(ctx); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("TLS握手失败: %v", err)
+		return nil, fmt.Errorf("TLS握手失败: %w", err)
 	}
 
 	return conn, nil
@@ -143,11 +145,15 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 		requestConfig := parseFingerprintFromHeaders(req.Header)
 
 		// 解析代理信息
-		headerProxy, _ := parseProxyFromHeaders(req.Header)
+		headerProxy, proxyErr := parseProxyFromHeaders(req.Header)
+		if proxyErr != nil {
+			logError("无效的 X-Mitm-Proxy: %v", proxyErr)
+			return
+		}
 		fingerprintInfo := formatFingerprintInfo(requestConfig)
 		proxyInfo := ""
 		if headerProxy != nil {
-			proxyInfo = headerProxy.String()
+			proxyInfo = proxyURLForLog(headerProxy)
 		}
 
 		// 记录 HTTPS 请求日志
@@ -220,7 +226,7 @@ func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, 
 			}
 
 			if proxyToUse != nil {
-				logDebug("使用代理建立连接: %s", proxyToUse.String())
+				logDebug("使用代理建立连接: %s", proxyURLForLog(proxyToUse))
 			} else {
 				logDebug("直连（未使用代理）")
 			}
@@ -686,31 +692,129 @@ func (p *MITMProxy) writeHTTP1Response(clientConn net.Conn, resp *http.Response)
 
 // dialThroughProxy 通过代理建立连接
 func (p *MITMProxy) dialThroughProxy(ctx context.Context, network, addr string, proxyURL *url.URL) (net.Conn, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("nil proxy dial context")
+	}
+	if proxyURL == nil || proxyURL.Host == "" {
+		return nil, fmt.Errorf("invalid proxy URL")
+	}
+	if strings.ContainsAny(addr, "\r\n") {
+		return nil, fmt.Errorf("invalid target address")
+	}
+	proxyScheme := strings.ToLower(proxyURL.Scheme)
+	if proxyScheme == "socks5" {
+		var authentication *xproxy.Auth
+		if proxyURL.User != nil {
+			password, _ := proxyURL.User.Password()
+			authentication = &xproxy.Auth{User: proxyURL.User.Username(), Password: password}
+		}
+		forward := &net.Dialer{Timeout: 30 * time.Second}
+		dialer, err := xproxy.SOCKS5("tcp", proxyURL.Host, authentication, forward)
+		if err != nil {
+			return nil, fmt.Errorf("创建SOCKS5代理连接失败: %w", err)
+		}
+		if contextDialer, ok := dialer.(xproxy.ContextDialer); ok {
+			connection, err := contextDialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, fmt.Errorf("通过SOCKS5代理连接失败: %w", err)
+			}
+			return connection, nil
+		}
+		connection, err := dialer.Dial(network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("通过SOCKS5代理连接失败: %w", err)
+		}
+		return connection, nil
+	}
+	if proxyScheme != "http" && proxyScheme != "https" {
+		return nil, fmt.Errorf("unsupported parent proxy scheme %q", proxyURL.Scheme)
+	}
 	// 连接代理服务器
-	proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 30*time.Second)
+	dialer := net.Dialer{Timeout: 30 * time.Second}
+	proxyConn, err := dialer.DialContext(ctx, "tcp", proxyURL.Host)
 	if err != nil {
-		return nil, fmt.Errorf("连接代理服务器失败: %v", err)
+		return nil, fmt.Errorf("连接代理服务器失败: %w", err)
+	}
+	handshakeDeadline := time.Now().Add(30 * time.Second)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Before(handshakeDeadline) {
+		handshakeDeadline = deadline
+	}
+	_ = proxyConn.SetDeadline(handshakeDeadline)
+	deadlineConnection := proxyConn
+	stopCancellation := context.AfterFunc(ctx, func() {
+		_ = deadlineConnection.SetDeadline(time.Now())
+	})
+	if proxyScheme == "https" {
+		tlsConnection := tls.Client(proxyConn, &tls.Config{
+			ServerName: proxyURL.Hostname(),
+			RootCAs:    p.proxyTLSRootCAs,
+			MinVersion: tls.VersionTLS12,
+		})
+		if err := tlsConnection.HandshakeContext(ctx); err != nil {
+			stopCancellation()
+			proxyConn.Close()
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, fmt.Errorf("HTTPS代理TLS握手失败: %w", err)
+		}
+		proxyConn = tlsConnection
 	}
 
 	// 发送 CONNECT 请求
-	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", addr, addr)
+	connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		credentials := base64.StdEncoding.EncodeToString([]byte(proxyURL.User.Username() + ":" + password))
+		connectReq += "Proxy-Authorization: Basic " + credentials + "\r\n"
+	}
+	connectReq += "\r\n"
 	if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+		stopCancellation()
 		proxyConn.Close()
-		return nil, fmt.Errorf("发送 CONNECT 请求失败: %v", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("发送 CONNECT 请求失败: %w", err)
 	}
 
 	// 读取响应
 	reader := bufio.NewReader(proxyConn)
-	resp, err := http.ReadResponse(reader, nil)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
 	if err != nil {
+		stopCancellation()
 		proxyConn.Close()
-		return nil, fmt.Errorf("读取代理响应失败: %v", err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("读取代理响应失败: %w", err)
 	}
+	resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		stopCancellation()
 		proxyConn.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("代理返回错误状态码: %d %s", resp.StatusCode, resp.Status)
 	}
-
+	if !stopCancellation() && ctx.Err() != nil {
+		proxyConn.Close()
+		return nil, ctx.Err()
+	}
+	_ = proxyConn.SetDeadline(time.Time{})
+	if reader.Buffered() > 0 {
+		return &bufferedProxyConn{Conn: proxyConn, reader: reader}, nil
+	}
 	return proxyConn, nil
+}
+
+type bufferedProxyConn struct {
+	net.Conn
+	reader *bufio.Reader
+}
+
+func (c *bufferedProxyConn) Read(buffer []byte) (int, error) {
+	return c.reader.Read(buffer)
 }

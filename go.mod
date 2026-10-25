@@ -8,6 +8,7 @@ require (
 	github.com/FastTLS/imitate v0.0.0-20261025022023-442a9557c0ef
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.9.3
+	golang.org/x/net v0.61.0
 )
 
 require (
@@ -18,7 +19,6 @@ require (
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.57.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	h12.io/socks v1.0.3 // indirect

@@ -118,6 +118,24 @@ func TestCONNECTAuthenticationRunsBeforeSuccess(t *testing.T) {
 	}
 }
 
+func TestInvalidParentProxyHeaderIsRejected(t *testing.T) {
+	proxy := &MITMProxy{delegate: &DefaultDelegate{}, listenAddr: "127.0.0.1:0"}
+	server := httptest.NewServer(proxy.handler())
+	defer server.Close()
+	proxyURL, _ := url.Parse(server.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	request, _ := http.NewRequest(http.MethodGet, "http://target.invalid/", nil)
+	request.Header.Set("X-Mitm-Proxy", "ftp://proxy.invalid:21")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.StatusCode)
+	}
+}
+
 type rejectingDelegate struct {
 	DefaultDelegate
 	authCalls   atomic.Int64

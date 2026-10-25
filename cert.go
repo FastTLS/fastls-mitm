@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -25,21 +26,26 @@ func (p *MITMProxy) generateCA() error {
 		caKeyPath = "mitm-ca-key.pem"
 	}
 
-	if certData, err := os.ReadFile(caCertPath); err == nil {
-		if keyData, err := os.ReadFile(caKeyPath); err == nil {
-			block, _ := pem.Decode(certData)
-			if block != nil {
-				p.caCert, _ = x509.ParseCertificate(block.Bytes)
-			}
-			keyBlock, _ := pem.Decode(keyData)
-			if keyBlock != nil {
-				p.caKey, _ = x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
-			}
-			p.caCertPEM = certData
-			p.caKeyPEM = keyData
-			logrus.Infof("已加载现有CA证书: %s", caCertPath)
-			return nil
+	certData, certErr := os.ReadFile(caCertPath)
+	keyData, keyErr := os.ReadFile(caKeyPath)
+	if certErr == nil || keyErr == nil {
+		if certErr != nil {
+			return fmt.Errorf("读取CA证书失败（私钥存在但证书不可用）: %w", certErr)
 		}
+		if keyErr != nil {
+			return fmt.Errorf("读取CA私钥失败（证书存在但私钥不可用）: %w", keyErr)
+		}
+		if err := p.loadCA(certData, keyData); err != nil {
+			return fmt.Errorf("加载现有CA失败: %w", err)
+		}
+		logrus.Infof("已加载现有CA证书: %s", caCertPath)
+		return nil
+	}
+	if !os.IsNotExist(certErr) {
+		return fmt.Errorf("读取CA证书失败: %w", certErr)
+	}
+	if !os.IsNotExist(keyErr) {
+		return fmt.Errorf("读取CA私钥失败: %w", keyErr)
 	}
 
 	logrus.Info("正在生成新的CA根证书（有效期15年）...")
@@ -93,6 +99,42 @@ func (p *MITMProxy) generateCA() error {
 	logrus.Infof("CA证书有效期: %s 至 %s", template.NotBefore.Format("2006-01-02"), template.NotAfter.Format("2006-01-02"))
 	logrus.Infof("请将 %s 添加到系统信任的根证书颁发机构", caCertPath)
 
+	return nil
+}
+
+func (p *MITMProxy) loadCA(certPEM, keyPEM []byte) error {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return fmt.Errorf("invalid CA certificate PEM")
+	}
+	certificate, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse CA certificate: %w", err)
+	}
+	if !certificate.IsCA {
+		return fmt.Errorf("certificate is not a CA")
+	}
+	if err := certificate.CheckSignatureFrom(certificate); err != nil {
+		return fmt.Errorf("CA certificate is not self-signed: %w", err)
+	}
+
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil || keyBlock.Type != "RSA PRIVATE KEY" {
+		return fmt.Errorf("invalid CA private key PEM")
+	}
+	privateKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse CA private key: %w", err)
+	}
+	publicKey, ok := certificate.PublicKey.(*rsa.PublicKey)
+	if !ok || publicKey.E != privateKey.PublicKey.E || publicKey.N.Cmp(privateKey.PublicKey.N) != 0 {
+		return fmt.Errorf("CA certificate and private key do not match")
+	}
+
+	p.caCert = certificate
+	p.caKey = privateKey
+	p.caCertPEM = append([]byte(nil), certPEM...)
+	p.caKeyPEM = append([]byte(nil), keyPEM...)
 	return nil
 }
 

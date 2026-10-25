@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -57,12 +58,17 @@ type MITMProxy struct {
 	caCertPath       string
 	caKeyPath        string
 	server           *http.Server
+	serverMu         sync.Mutex
+	tunnelMu         sync.Mutex
+	tunnels          map[net.Conn]struct{}
+	tunnelClosing    bool
 	certCache        CertCache
 	fingerprint      fastls.Fingerprint
 	browser          string
 	listenAddr       string
 	disableConnect   bool
 	verifyTargetCert bool // 是否验证目标服务器证书
+	proxyTLSRootCAs  *x509.CertPool
 	delegate         Delegate
 }
 
@@ -79,6 +85,8 @@ type NewMITMProxyOptions struct {
 	// primarily useful for isolated development and test instances.
 	CACertPath string
 	CAKeyPath  string
+	// ProxyTLSRootCAs optionally replaces system roots for HTTPS parent proxies.
+	ProxyTLSRootCAs *x509.CertPool
 }
 
 // NewMITMProxy 创建 MITM 代理服务器
@@ -113,6 +121,8 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 		delegate:         opts.Delegate,
 		caCertPath:       opts.CACertPath,
 		caKeyPath:        opts.CAKeyPath,
+		proxyTLSRootCAs:  opts.ProxyTLSRootCAs,
+		tunnels:          make(map[net.Conn]struct{}),
 	}
 
 	if err := proxy.generateCA(); err != nil {
@@ -151,12 +161,16 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	// 解析指纹和代理信息
 	requestConfig := parseFingerprintFromHeaders(r.Header)
-	headerProxy, _ := parseProxyFromHeaders(r.Header)
+	headerProxy, err := parseProxyFromHeaders(r.Header)
+	if err != nil {
+		http.Error(w, "Invalid X-Mitm-Proxy: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	fingerprintInfo := formatFingerprintInfo(requestConfig)
 	proxyInfo := ""
 	if headerProxy != nil {
-		proxyInfo = headerProxy.String()
+		proxyInfo = proxyURLForLog(headerProxy)
 	}
 
 	logRequest("CONNECT", host, fingerprintInfo, proxyInfo)
@@ -200,6 +214,10 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer clientConn.Close()
+	if !p.trackTunnel(clientConn) {
+		return
+	}
+	defer p.untrackTunnel(clientConn)
 
 	response := "HTTP/1.1 200 Connection Established\r\n\r\n"
 	n, err := clientConn.Write([]byte(response))
@@ -269,7 +287,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	var parentProxy *url.URL
 	if headerProxy != nil {
 		parentProxy = headerProxy
-		logDebug("使用请求头指定的代理: %s", parentProxy.String())
+		logDebug("使用请求头指定的代理: %s", proxyURLForLog(parentProxy))
 	} else {
 		parentProxy, err = p.delegate.ParentProxy(r)
 		if err != nil {
@@ -377,12 +395,17 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 解析指纹和代理信息
 	requestConfig := parseFingerprintFromHeaders(r.Header)
-	headerProxy, _ := parseProxyFromHeaders(r.Header)
+	headerProxy, err := parseProxyFromHeaders(r.Header)
+	if err != nil {
+		http.Error(w, "Invalid X-Mitm-Proxy: "+err.Error(), http.StatusBadRequest)
+		p.delegate.Finish(ctx)
+		return
+	}
 
 	fingerprintInfo := formatFingerprintInfo(requestConfig)
 	proxyInfo := ""
 	if headerProxy != nil {
-		proxyInfo = headerProxy.String()
+		proxyInfo = proxyURLForLog(headerProxy)
 	}
 
 	logRequest(r.Method, targetURL, fingerprintInfo, proxyInfo)
@@ -494,7 +517,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	var parentProxy *url.URL
 	if headerProxy != nil {
 		parentProxy = headerProxy
-		logDebug("使用请求头指定的代理: %s", parentProxy.String())
+		logDebug("使用请求头指定的代理: %s", proxyURLForLog(parentProxy))
 	} else {
 		parentProxy, err = p.delegate.ParentProxy(r)
 		if err != nil {
@@ -603,23 +626,121 @@ func (p *MITMProxy) handler() http.Handler {
 }
 
 func (p *MITMProxy) Start() error {
+	return p.StartContext(context.Background())
+}
 
-	p.server = &http.Server{
-		Addr:    p.listenAddr,
-		Handler: p.handler(),
+func (p *MITMProxy) StartContext(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("nil start context")
 	}
+	listener, err := net.Listen("tcp", p.listenAddr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 
-	logrus.Infof("代理服务器启动在 %s", p.listenAddr)
+	logrus.Infof("代理服务器启动在 %s", listener.Addr())
 	if p.disableConnect {
 		logrus.Warnf("CONNECT 隧道请求已禁用")
 	}
+	server, err := p.prepareServer(listener)
+	if err != nil {
+		return err
+	}
+	shutdownResult := make(chan error, 1)
+	stopCancellation := context.AfterFunc(ctx, func() { shutdownResult <- p.Stop() })
+	err = p.servePrepared(server, listener)
+	if stopCancellation() {
+		return err
+	}
+	return errors.Join(err, <-shutdownResult)
+}
 
-	return p.server.ListenAndServe()
+func (p *MITMProxy) serve(listener net.Listener) error {
+	server, err := p.prepareServer(listener)
+	if err != nil {
+		return err
+	}
+	return p.servePrepared(server, listener)
+}
+
+func (p *MITMProxy) prepareServer(listener net.Listener) (*http.Server, error) {
+	server := &http.Server{Addr: listener.Addr().String(), Handler: p.handler()}
+	p.serverMu.Lock()
+	if p.server != nil {
+		p.serverMu.Unlock()
+		return nil, fmt.Errorf("proxy server is already running")
+	}
+	p.tunnelMu.Lock()
+	p.tunnelClosing = false
+	p.tunnelMu.Unlock()
+	p.server = server
+	p.serverMu.Unlock()
+	return server, nil
+}
+
+func (p *MITMProxy) servePrepared(server *http.Server, listener net.Listener) error {
+	err := server.Serve(listener)
+	p.serverMu.Lock()
+	if p.server == server {
+		p.server = nil
+	}
+	p.serverMu.Unlock()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+func (p *MITMProxy) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return fmt.Errorf("nil shutdown context")
+	}
+	p.serverMu.Lock()
+	server := p.server
+	p.serverMu.Unlock()
+	p.closeTunnels()
+	if server == nil {
+		return nil
+	}
+	return server.Shutdown(ctx)
 }
 
 func (p *MITMProxy) Stop() error {
-	if p.server != nil {
-		return p.server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return p.Shutdown(ctx)
+}
+
+func (p *MITMProxy) trackTunnel(connection net.Conn) bool {
+	p.tunnelMu.Lock()
+	defer p.tunnelMu.Unlock()
+	if p.tunnelClosing {
+		_ = connection.Close()
+		return false
 	}
-	return nil
+	if p.tunnels == nil {
+		p.tunnels = make(map[net.Conn]struct{})
+	}
+	p.tunnels[connection] = struct{}{}
+	return true
+}
+
+func (p *MITMProxy) untrackTunnel(connection net.Conn) {
+	p.tunnelMu.Lock()
+	delete(p.tunnels, connection)
+	p.tunnelMu.Unlock()
+}
+
+func (p *MITMProxy) closeTunnels() {
+	p.tunnelMu.Lock()
+	p.tunnelClosing = true
+	connections := make([]net.Conn, 0, len(p.tunnels))
+	for connection := range p.tunnels {
+		connections = append(connections, connection)
+	}
+	p.tunnelMu.Unlock()
+	for _, connection := range connections {
+		_ = connection.Close()
+	}
 }

@@ -444,7 +444,7 @@ MITM 代理支持通过请求头动态配置指纹和 HTTP/2 设置，优先级�
 | `X-Mitm-Ja3` | 自定义 JA3 指纹字符串 | `771,4865-4866-4867,43-10-51-11-13-0-16-45,29-23-24,1` |
 | `X-Mitm-Ja4r` | 自定义 JA4R 指纹字符串 | `t13d1517h2_002f,0035,009c,009d,1301,1302,1303...` |
 | `X-Mitm-H2Settings` | HTTP/2 设置字符串 | `1:65536;2:0;4:6291456;6:262144\|15663105\|0\|m,a,s,p` |
-| `X-Mitm-Proxy` | 上级代理地址 | `http://127.0.0.1:10809` 或 `http://user:pass@proxy.com:8080` |
+| `X-Mitm-Proxy` | 上级代理地址 | `http://user:pass@proxy:8080`、`https://proxy:8443` 或 `socks5://user:pass@proxy:1080` |
 
 ### 优先级说明
 
@@ -545,7 +545,14 @@ curl -x http://127.0.0.1:8888 \
 curl -x http://127.0.0.1:8888 \
   -H "X-Mitm-Proxy: http://user:pass@proxy.com:8080" \
   https://example.com
+
+# HTTPS 或 SOCKS5 上级代理
+curl -x http://127.0.0.1:8888 \
+  -H "X-Mitm-Proxy: socks5://user:pass@proxy.com:1080" \
+  https://example.com
 ```
+
+HTTP/HTTPS 上级代理通过 CONNECT 转发并支持 Basic 认证；SOCKS5 支持用户名/密码认证。HTTPS 上级代理默认使用系统根证书验证，嵌入式使用时可通过 `NewMITMProxyOptions.ProxyTLSRootCAs` 提供专用根证书。日志会移除代理 URL 中的用户名和密码。
 
 ## 故障排除
 
@@ -567,7 +574,8 @@ curl -x http://127.0.0.1:8888 \
 
 1. 检查是否有写入权限
 2. 确保磁盘空间充足
-3. 查看日志输出获取详细错误信息
+3. 确认 `-ca-cert` 与 `-ca-key` 同时存在且互相匹配；损坏、非 CA 或不匹配的文件会被拒绝，不会被静默覆盖
+4. 查看日志输出获取详细错误信息
 
 ## 高级功能
 
@@ -602,6 +610,7 @@ MITM 代理会自动管理连接资源：
 - **客户端断开时自动清理**: 当客户端连接断开时，代理会自动关闭对应的服务端连接，避免资源泄漏
 - **HTTP/2 连接复用**: 支持 HTTP/2 连接复用，提高性能
 - **连接超时处理**: 自动处理连接超时和异常情况
+- **安全停止**: 收到 Ctrl+C、SIGINT 或 SIGTERM 后停止监听，关闭已劫持的 CONNECT 隧道，并等待普通 HTTP 请求结束
 
 ### HTTP/2 设置自动推导
 

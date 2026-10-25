@@ -61,13 +61,28 @@ func parseProxyFromHeaders(headers http.Header) (*url.URL, error) {
 	if err != nil {
 		return nil, fmt.Errorf("解析代理URL失败: %v", err)
 	}
+	if proxyURL.Host == "" {
+		return nil, fmt.Errorf("代理URL缺少主机")
+	}
 
 	// 验证代理协议
+	proxyURL.Scheme = strings.ToLower(proxyURL.Scheme)
 	if proxyURL.Scheme != "http" && proxyURL.Scheme != "https" && proxyURL.Scheme != "socks5" {
 		return nil, fmt.Errorf("不支持的代理协议: %s (仅支持 http, https, socks5)", proxyURL.Scheme)
 	}
 
 	return proxyURL, nil
+}
+
+func proxyURLForLog(proxyURL *url.URL) string {
+	if proxyURL == nil {
+		return ""
+	}
+	redacted := *proxyURL
+	if redacted.User != nil {
+		redacted.User = url.User("redacted")
+	}
+	return redacted.String()
 }
 
 // formatFingerprintInfo 格式化指纹信息用于日志

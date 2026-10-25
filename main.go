@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	fastls "github.com/FastTLS/fastls"
 	"github.com/sirupsen/logrus"
@@ -99,6 +102,8 @@ func main() {
 		VerifyTargetCert: verifyTargetCert,
 		Delegate:         &DefaultDelegate{},
 		CertCache:        NewDefaultCertCache(),
+		CACertPath:       caCertPath,
+		CAKeyPath:        caKeyPath,
 	})
 	if err != nil {
 		logrus.Fatalf("创建代理服务器失败: %v", err)
@@ -119,7 +124,12 @@ func main() {
 		logrus.Info("=" + strings.Repeat("=", 60))
 	}
 
-	if err := proxy.Start(); err != nil {
+	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	if err := proxy.StartContext(shutdownContext); err != nil {
 		logrus.Fatalf("代理服务器启动失败: %v", err)
+	}
+	if shutdownContext.Err() != nil {
+		logrus.Info("代理服务器已安全停止")
 	}
 }

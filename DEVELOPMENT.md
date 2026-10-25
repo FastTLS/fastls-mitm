@@ -32,7 +32,7 @@ go build -o build/fastls-mitm .
 
 代理路径修改至少应覆盖：普通 HTTP、CONNECT、客户端 TLS、到目标的 TLS、HTTP/1.1 响应、HTTP/2 交接、错误关闭和取消传播。优先使用 `httptest` 与环回地址，避免公网依赖。
 
-需要创建代理实例的测试必须通过 `NewMITMProxyOptions.CACertPath` 与 `CAKeyPath` 指向 `t.TempDir()`；不得在仓库目录写入测试 CA。CONNECT 认证测试必须确认拒绝发生在劫持连接和发送成功响应之前。
+需要创建代理实例的测试必须通过 `NewMITMProxyOptions.CACertPath` 与 `CAKeyPath` 指向 `t.TempDir()`；不得在仓库目录写入测试 CA。CONNECT 认证测试必须确认拒绝发生在劫持连接和发送成功响应之前。上级代理变更必须分别覆盖 HTTP Basic、HTTPS 证书校验、SOCKS5 用户名/密码、握手取消和日志凭据脱敏。生命周期变更必须验证 context 取消、监听器停止和已劫持隧道关闭。
 
 ## CI 门禁
 
