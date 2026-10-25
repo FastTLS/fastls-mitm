@@ -1,0 +1,107 @@
+name: Development artifacts
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: development-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-attest-verify:
+    name: Build, attest and verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: true
+      - name: Validate source before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod verify
+          if grep -Eq '^[[:space:]]*replace[[:space:]]' go.mod; then
+            echo 'replace directives are not allowed in signed builds' >&2
+            exit 1
+          fi
+          if go mod graph | grep -F 'github.com/FastTLS/fhttp'; then
+            echo 'legacy fhttp dependency remains in the module graph' >&2
+            exit 1
+          fi
+          go test ./...
+          go vet ./...
+      - name: Build development archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist staging
+          version="dev-${GITHUB_SHA::12}"
+          build_time="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          ldflags="-s -w -X main.version=${version} -X main.buildTime=${build_time} -X main.gitCommit=${GITHUB_SHA}"
+
+          build_target() {
+            local goos="$1" goarch="$2" ext="$3"
+            local archive="fastls-mitm-${version}-${goos}-${goarch}"
+            local stage="staging/${archive}"
+            mkdir -p "${stage}"
+            GOOS="${goos}" GOARCH="${goarch}" go build -trimpath -buildvcs=true -ldflags "${ldflags}" -o "${stage}/fastls-mitm${ext}" .
+            printf 'project=fastls-mitm\nversion=%s\ncommit=%s\nbuilt_at=%s\ngo=%s\ntarget=%s/%s\n' \
+              "${version}" "${GITHUB_SHA}" "${build_time}" "$(go env GOVERSION)" "${goos}" "${goarch}" > "${stage}/BUILD_INFO.txt"
+            if [[ "${goos}" == windows ]]; then
+              (cd staging && zip -q -r "../dist/${archive}.zip" "${archive}")
+            else
+              tar -C staging -czf "dist/${archive}.tar.gz" "${archive}"
+            fi
+          }
+
+          build_target linux amd64 ''
+          build_target linux arm64 ''
+          build_target windows amd64 '.exe'
+          build_target windows arm64 '.exe'
+          build_target darwin amd64 ''
+          build_target darwin arm64 ''
+
+          (cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: Sign build provenance
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Preserve and verify provenance bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp '${{ steps.attest.outputs.bundle-path }}' dist/provenance.sigstore.json
+          for artifact in dist/*.tar.gz dist/*.zip; do
+            gh attestation verify "${artifact}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --bundle dist/provenance.sigstore.json \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/development-artifacts.yml"
+          done
+      - name: Upload development artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: fastls-mitm-development-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error

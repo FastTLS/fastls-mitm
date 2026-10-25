@@ -1,16 +1,53 @@
-name: Go tests
+name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
+env:
+  GOWORK: 'off'
+
 jobs:
+  dependency-policy:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: true
+      - name: Verify module integrity
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Enforce standalone dependencies
+        shell: bash
+        run: |
+          if grep -Eq '^[[:space:]]*replace[[:space:]]' go.mod; then
+            echo 'replace directives are not allowed in the standalone module' >&2
+            exit 1
+          fi
+          if go mod graph | grep -F 'github.com/FastTLS/fhttp'; then
+            echo 'legacy fhttp dependency remains in the module graph' >&2
+            exit 1
+          fi
+
   test:
     name: ${{ matrix.os }} / Go ${{ matrix.go }}
+    needs: dependency-policy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -25,26 +62,39 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           cache: true
-      - name: Verify standalone dependency graph
-        shell: bash
-        env:
-          GOWORK: 'off'
-        run: |
-          go mod verify
-          if go mod graph | grep -F 'github.com/FastTLS/fhttp'; then
-            echo 'legacy fhttp dependency remains in the module graph' >&2
-            exit 1
-          fi
       - name: Test
-        env:
-          GOWORK: 'off'
         run: go test ./...
       - name: Vet
-        env:
-          GOWORK: 'off'
         run: go vet ./...
+      - name: Build all packages
+        run: go build ./...
+
+  quality:
+    name: Race, coverage and CLI smoke test
+    needs: dependency-policy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: true
       - name: Race test
-        if: matrix.os == 'ubuntu-24.04' && matrix.go == '1.26.10'
-        env:
-          GOWORK: 'off'
         run: go test -race ./...
+      - name: Coverage
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go tool cover -func=coverage.out
+      - name: CLI smoke test
+        run: |
+          go build -o build/fastls-mitm .
+          ./build/fastls-mitm -version
+      - name: Upload coverage
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.out
+          retention-days: 14
+          if-no-files-found: error

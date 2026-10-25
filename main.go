@@ -28,7 +28,7 @@ func main() {
 	flag.StringVar(&listenAddr, "addr", ":8888", "监听地址 (例如: :8888 或 0.0.0.0:8888)")
 	flag.StringVar(&listenAddr, "a", ":8888", "监听地址 (addr 的缩写)")
 
-	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome, chrome120, chrome142, chromium, edge, firefox(latest), firefox144, firefox147, firefox151, safari, opera)")
+	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome/chrome160, chrome150..160, edge/edge160, edge150..160, firefox/firefox158, firefox151..158, safari, opera)")
 	flag.StringVar(&browser, "b", "chrome142", "浏览器类型 (browser 的缩写)")
 
 	flag.StringVar(&ja3, "ja3", "", "自定义JA3指纹字符串 (如果指定，将忽略browser参数)")

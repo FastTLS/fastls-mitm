@@ -2,6 +2,10 @@
 
 中间人代理服务器，支持 TLS 指纹伪造。
 
+> 当前状态：开发阶段。仓库只生成带来源证明、保留 14 天的开发构建，不创建版本标签、GitHub Release 或正式发布包。
+
+文档导航：[详细代理说明](./MITM_PROXY.md) · [委托模式](./DELEGATE_EXAMPLE.md) · [客户端示例](./example/README.md) · [开发流程](./DEVELOPMENT.md) · [产物签发验证](./ARTIFACTS.md)
+
 ## ⚠️ 安全声明
 
 **重要警告**：本工具仅用于合法的安全测试、开发和调试目的。使用本工具时，您必须遵守以下规定：
@@ -197,6 +201,20 @@ MITM 代理**确实在解析后转发**，而且**指纹确实有意义**：
 
 这就是为什么 MITM 代理需要处理 CONNECT 请求，并且指纹在代理与目标服务器连接时应用的原因。
 
+## 从源码构建
+
+需要 Go 1.26 或更高版本。仓库是独立 module，建议使用 `GOWORK=off`：
+
+```bash
+git clone https://github.com/FastTLS/fastls-mitm.git
+cd fastls-mitm
+go mod download
+go build -o fastls-mitm .
+./fastls-mitm -version
+```
+
+Windows 将输出文件改为 `fastls-mitm.exe`。传输链路基于 `fastls` + `ftransport`，不再依赖 `fhttp`。
+
 ## 使用方法
 
 ### 启动代理服务器
@@ -230,7 +248,7 @@ fastls-mitm.exe -addr :8888 -browser chrome142
 | `-version` | `-v` | 显示版本信息并退出 | - |
 | `-help` | `-h` | 显示帮助信息并退出 | - |
 
-**浏览器类型选项**: `chrome`, `chrome120`, `chrome142`, `chromium`, `edge`, `firefox`, `safari`, `opera`
+**浏览器类型选项**：建议使用滚动别名 `chrome`、`edge`、`firefox`、`safari`、`opera` 或 `chromium`；需要固定实验条件时可以使用 `chrome150` 至 `chrome160`、`edge150` 至 `edge160`、`firefox151` 至 `firefox158`，以及兼容保留的历史选择器。
 
 **注意**: 
 - 如果指定了 `-ja3` 或 `-ja4r`，将忽略 `-browser` 参数
@@ -630,3 +648,19 @@ MITM 代理支持扩展的 HTTP/2 设置，例如 Safari 使用的 `NO_RFC7540_P
 - 妥善保管 CA 证书和私钥，避免泄露
 - 使用完毕后及时清理证书文件
 - 请参考文档开头的"安全声明"部分，了解合法使用范围和禁止用途
+
+## 测试与 Actions
+
+本地最小验证：
+
+```bash
+go mod verify
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./...
+```
+
+CI 覆盖 Windows、Linux、macOS 与 Go 1.26.10/1.27.3，执行依赖策略、单元及真实 TLS/HTTP/2 交接测试、竞态检测、覆盖率、静态检查、全包构建和 CLI 冒烟测试。`main` 分支会构建六个平台开发包，生成 SHA-256 校验和与 Sigstore/GitHub 来源证明，并在上传前验证证明。
+
+完整开发门禁见 [DEVELOPMENT.md](./DEVELOPMENT.md)，下载和验证开发构建见 [ARTIFACTS.md](./ARTIFACTS.md)。

@@ -11,8 +11,8 @@
 ## 编译
 
 ```bash
-cd services/fastls-mitm
-go build -o mitm_proxy.exe main.go
+cd fastls-mitm
+go build -o fastls-mitm.exe .
 ```
 
 ## 使用方法
@@ -21,19 +21,19 @@ go build -o mitm_proxy.exe main.go
 
 ```bash
 # 使用默认配置（监听8888端口，Chrome142指纹）
-./mitm_proxy.exe
+./fastls-mitm.exe
 
 # 指定监听地址
-./mitm_proxy.exe -addr :8888
+./fastls-mitm.exe -addr :8888
 
 # 指定浏览器指纹
-./mitm_proxy.exe -addr :8888 -browser chrome142
+./fastls-mitm.exe -addr :8888 -browser chrome142
 
 # 使用自定义JA3指纹
-./mitm_proxy.exe -addr :8888 -ja3 "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0"
+./fastls-mitm.exe -addr :8888 -ja3 "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0"
 
 # 使用自定义JA4R指纹
-./mitm_proxy.exe -addr :8888 -ja4r "t13d5911_002f,0032,0033,0035,0038,0039,003c,003d,0040,0067,006a,006b,009c,009d,009e,009f,00a2,00a3,00ff,1301,1302,1303,c009,c00a,c013,c014,c023,c024,c027,c028,c02b,c02c,c02f,c030,c050,c051,c052,c053,c056,c057,c05c,c05d,c060,c061,c09c,c09d,c09e,c09f,c0a0,c0a1,c0a2,c0a3,c0ac,c0ad,c0ae,c0af,cca8,cca9,ccaa_000a,000b,000d,0016,0017,0023,002b,002d,0033_0403,0503,0603,0807,0808,0809,080a,080b,0804,0805,0806,0401,0501,0601,0303,0301,0302,0402,0502,0602"
+./fastls-mitm.exe -addr :8888 -ja4r "t13d5911_002f,0032,0033,0035,0038,0039,003c,003d,0040,0067,006a,006b,009c,009d,009e,009f,00a2,00a3,00ff,1301,1302,1303,c009,c00a,c013,c014,c023,c024,c027,c028,c02b,c02c,c02f,c030,c050,c051,c052,c053,c056,c057,c05c,c05d,c060,c061,c09c,c09d,c09e,c09f,c0a0,c0a1,c0a2,c0a3,c0ac,c0ad,c0ae,c0af,cca8,cca9,ccaa_000a,000b,000d,0016,0017,0023,002b,002d,0033_0403,0503,0603,0807,0808,0809,080a,080b,0804,0805,0806,0401,0501,0601,0303,0301,0302,0402,0502,0602"
 ```
 
 ### 命令行参数
@@ -49,14 +49,9 @@ go build -o mitm_proxy.exe main.go
 
 ### 支持的浏览器类型
 
-- `chrome` - Chrome浏览器
-- `chrome120` - Chrome 120版本
-- `chrome142` - Chrome 142版本
-- `chromium` - Chromium浏览器
-- `edge` - Microsoft Edge浏览器
-- `firefox` - Firefox浏览器
-- `safari` - Safari浏览器
-- `opera` - Opera浏览器
+- 滚动别名：`chrome`、`edge`、`firefox`、`chromium`、`safari`、`opera`
+- 版本选择器：`chrome150`…`chrome160`、`edge150`…`edge160`、`firefox151`…`firefox158`
+- 兼容保留：`chrome120`、`chrome142`、`firefox144`、`firefox147`、`firefox148`
 
 ## 配置代理
 
@@ -108,19 +103,19 @@ export https_proxy=http://127.0.0.1:8888
 ### 示例1: 使用Chrome142指纹
 
 ```bash
-./mitm_proxy.exe -addr :8888 -browser chrome142
+./fastls-mitm.exe -addr :8888 -browser chrome142
 ```
 
 ### 示例2: 使用自定义JA3指纹
 
 ```bash
-./mitm_proxy.exe -addr :8888 -ja3 "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0"
+./fastls-mitm.exe -addr :8888 -ja3 "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24,0"
 ```
 
 ### 示例3: 监听所有网络接口
 
 ```bash
-./mitm_proxy.exe -addr 0.0.0.0:8888 -browser firefox
+./fastls-mitm.exe -addr 0.0.0.0:8888 -browser firefox
 ```
 
 ## 工作原理
