@@ -56,19 +56,22 @@ func TestMITMProxyLocalHTTPAndHTTPS(t *testing.T) {
 		t.Fatalf("HTTP proxy result: status=%d body=%q err=%v", httpResponse.StatusCode, httpBody, err)
 	}
 
-	httpsTarget := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	httpsTarget := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Mitm-Browser") != "" {
 			t.Error("MITM control header leaked to HTTPS target")
 		}
-		_, _ = io.WriteString(w, "https-through-mitm")
+		_, _ = io.WriteString(w, r.Proto+"|https-through-mitm")
 	}))
+	httpsTarget.EnableHTTP2 = true
+	httpsTarget.StartTLS()
 	defer httpsTarget.Close()
 
 	roots := x509.NewCertPool()
 	roots.AddCert(proxy.caCert)
 	httpsTransport := &http.Transport{
-		Proxy:           http.ProxyURL(proxyURL),
-		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		Proxy:             http.ProxyURL(proxyURL),
+		TLSClientConfig:   &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
+		ForceAttemptHTTP2: true,
 	}
 	httpsClient := &http.Client{Transport: httpsTransport}
 	httpsRequest, _ := http.NewRequest(http.MethodGet, httpsTarget.URL, nil)
@@ -80,7 +83,7 @@ func TestMITMProxyLocalHTTPAndHTTPS(t *testing.T) {
 	httpsBody, err := io.ReadAll(httpsResponse.Body)
 	httpsResponse.Body.Close()
 	httpsTransport.CloseIdleConnections()
-	if err != nil || httpsResponse.StatusCode != http.StatusOK || string(httpsBody) != "https-through-mitm" {
+	if err != nil || httpsResponse.StatusCode != http.StatusOK || httpsResponse.ProtoMajor != 1 || string(httpsBody) != "HTTP/2.0|https-through-mitm" {
 		t.Fatalf("HTTPS proxy result: status=%d body=%q err=%v", httpsResponse.StatusCode, httpsBody, err)
 	}
 	if httpsResponse.TLS == nil || len(httpsResponse.TLS.PeerCertificates) == 0 ||

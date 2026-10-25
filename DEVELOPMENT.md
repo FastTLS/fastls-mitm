@@ -34,6 +34,8 @@ go build -o build/fastls-mitm .
 
 需要创建代理实例的测试必须通过 `NewMITMProxyOptions.CACertPath` 与 `CAKeyPath` 指向 `t.TempDir()`；不得在仓库目录写入测试 CA。CONNECT 认证测试必须确认拒绝发生在劫持连接和发送成功响应之前。上级代理变更必须分别覆盖 HTTP Basic、HTTPS 证书校验、SOCKS5 用户名/密码、握手取消和日志凭据脱敏。生命周期变更必须验证 context 取消、监听器停止和已劫持隧道关闭。
 
+`binary_e2e_test.go` 会构建并启动当前 MITM CLI，使用临时 CA 和环回 HTTP/HTTPS 目标验证真实代理进程。不得写入仓库 CA，也不得访问公网。
+
 ## CI 门禁
 
 `.github/workflows/ci.yml` 执行：

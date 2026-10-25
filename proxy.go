@@ -243,6 +243,10 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
+		// Keep the client-facing side on HTTP/1.1 so request-level control
+		// headers can be inspected and stripped. The target-facing side may
+		// still negotiate HTTP/2 and is bridged by handleHTTP1Tunnel.
+		NextProtos: []string{"http/1.1"},
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := clientHello.ServerName
 			if sni == "" {
@@ -261,13 +265,9 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	clientProtocol := tlsConn.ConnectionState().NegotiatedProtocol
 	logProtocol("客户端协商的协议: %s", clientProtocol)
 
-	// 如果客户端使用 HTTP/1.1 或未协商协议，强制代理到服务器也使用 HTTP/1.1
-	// 这样可以避免服务器协商 HTTP/2 后，MITM 尝试使用 HTTP/2 失败导致的问题
+	// The client-facing side stays on HTTP/1.1 for interception, while the
+	// target-facing connection remains free to negotiate HTTP/2.
 	forceProtocol := ""
-	if clientProtocol == "" || clientProtocol == "http/1.1" {
-		forceProtocol = "http/1.1"
-		logProtocol("客户端使用 HTTP/1.1，强制代理到服务器也使用 HTTP/1.1")
-	}
 
 	// 检查是否通过请求头强制使用 HTTP/1.1（优先级更高）
 	if r.Header.Get("X-Mitm-Force-HTTP11") == "true" {
@@ -295,7 +295,8 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// CONNECT 阶段无代理信息时延迟建立连接，等待第一个 HTTPS 请求获取代理信息
+	// Delay dialing until the first decrypted request when no parent proxy was
+	// supplied on CONNECT, so request-level proxy headers remain available.
 	var targetConn net.Conn
 	if parentProxy == nil {
 		// 延迟建立连接，在 handleHTTP1Tunnel 中从第一个 HTTPS 请求获取代理信息
@@ -332,29 +333,11 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx.Data["targetConn"] = targetConn
 	ctx.Data["parentProxy"] = parentProxy
 
-	// 只有当客户端和服务器都使用相同协议（都是 h2）时，才使用透明转发
-	// 如果客户端是 HTTP/1.1，即使服务器协商了 h2，也使用 HTTP/1.1 方式处理
-	// 因为服务器虽然协商了 h2，但通常也支持 HTTP/1.1
-	if targetConn != nil && clientProtocol == "h2" && targetProtocol == "h2" {
-		logHTTP2("客户端和服务器都使用 HTTP/2，切换到透明转发模式")
-		p.handleTransparentTunnel(tlsConn, targetConn)
-		return
-	}
-
-	if (clientProtocol == "" || clientProtocol == "http/1.1") &&
-		(targetConn == nil || targetProtocol == "" || targetProtocol == "http/1.1" || targetProtocol == "h2") {
-		// 客户端是 HTTP/1.1，即使服务器协商了 h2，也使用 HTTP/1.1 方式处理
-		logHTTP1("使用 HTTP/1.x 请求/响应解析模式")
-		p.handleHTTP1Tunnel(tlsConn, targetConn, hostname, ctx)
-	} else if targetConn != nil && clientProtocol == "h2" {
-		// 客户端是 h2，但服务器不是 h2，使用透明转发（服务器会降级处理）
-		logTunnel("使用透明转发模式（客户端 HTTP/2）")
-		p.handleTransparentTunnel(tlsConn, targetConn)
-	} else {
-		// 延迟建立连接的情况，只处理 HTTP/1.1
-		logHTTP1("使用 HTTP/1.x 请求/响应解析模式（延迟建立连接）")
-		p.handleHTTP1Tunnel(tlsConn, nil, hostname, ctx)
-	}
+	// The client side is deliberately HTTP/1.1 so every request can be parsed,
+	// delegated and stripped of X-Mitm-* controls. handleHTTP1Tunnel bridges to
+	// either HTTP/1.1 or HTTP/2 on the target-facing connection.
+	logHTTP1("使用 HTTP/1.x 请求/响应解析和协议交接模式")
+	p.handleHTTP1Tunnel(tlsConn, targetConn, hostname, ctx)
 }
 
 func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
