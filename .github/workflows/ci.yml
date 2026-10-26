@@ -85,6 +85,8 @@ jobs:
         run: go test -race ./...
       - name: Policy hop and control-header fuzz
         run: go test -run '^$' -fuzz '^FuzzMITMPolicyHeaders$' -fuzztime 20s .
+      - name: Cumulative tunnel traffic budget fuzz
+        run: go test -run '^$' -fuzz '^FuzzPolicyTrafficBudget$' -fuzztime 20s .
       - name: Coverage
         run: |
           go test -covermode=atomic -coverprofile=coverage.out ./...

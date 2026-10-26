@@ -15,22 +15,25 @@ import (
 
 func main() {
 	var (
-		listenAddr       string
-		browser          string
-		ja3              string
-		ja4r             string
-		caCertPath       string
-		caKeyPath        string
-		disableConnect   bool
-		verifyTargetCert bool
-		debug            bool
-		showVersion      bool
-		showHelp         bool
-		policyFile       string
-		policyMaximum    int64
-		policyInflight   int
-		policyTunnels    int
-		policyTunnelAge  time.Duration
+		listenAddr        string
+		browser           string
+		ja3               string
+		ja4r              string
+		caCertPath        string
+		caKeyPath         string
+		disableConnect    bool
+		verifyTargetCert  bool
+		debug             bool
+		showVersion       bool
+		showHelp          bool
+		policyFile        string
+		policyMaximum     int64
+		policyInflight    int
+		policyTunnels     int
+		policyTunnelAge   time.Duration
+		policyConnections int
+		policyTunnelRead  int64
+		policyTunnelWrite int64
 	)
 
 	// 定义完整参数和缩写参数
@@ -41,6 +44,9 @@ func main() {
 	flag.IntVar(&policyInflight, "policy-max-inflight", 0, "Maximum active policy HTTP requests; 0 is unlimited; requires address-policy")
 	flag.IntVar(&policyTunnels, "policy-max-tunnels", 0, "Maximum admitted policy CONNECT tunnels; 0 is unlimited; requires address-policy")
 	flag.DurationVar(&policyTunnelAge, "policy-tunnel-max-age", 0, "Maximum policy tunnel lifetime (0..24h); 0 disables; requires address-policy")
+	flag.IntVar(&policyConnections, "policy-max-connections", 0, "Maximum admitted inbound TCP connections; excess connections close before HTTP; requires address-policy")
+	flag.Int64Var(&policyTunnelRead, "policy-tunnel-max-read-bytes", 0, "Cumulative client TLS bytes per CONNECT (0..1 TiB); 0 disables; requires address-policy")
+	flag.Int64Var(&policyTunnelWrite, "policy-tunnel-max-write-bytes", 0, "Cumulative server TLS bytes per CONNECT (0..1 TiB); 0 disables; requires address-policy")
 
 	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome/chrome160, chrome150..160, edge/edge160, edge150..160, firefox/firefox158, firefox151..158, safari, opera)")
 	flag.StringVar(&browser, "b", "chrome142", "浏览器类型 (browser 的缩写)")
@@ -118,20 +124,23 @@ func main() {
 	}
 
 	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{
-		AddressPolicyFile:     policyFile,
-		PolicyMaxRequestBytes: policyMaximum,
-		PolicyMaxInflight:     policyInflight,
-		PolicyMaxTunnels:      policyTunnels,
-		PolicyTunnelMaxAge:    policyTunnelAge,
-		ListenAddr:            listenAddr,
-		Fingerprint:           fingerprint,
-		Browser:               browserType,
-		DisableConnect:        disableConnect,
-		VerifyTargetCert:      verifyTargetCert,
-		Delegate:              &DefaultDelegate{},
-		CertCache:             NewDefaultCertCache(),
-		CACertPath:            caCertPath,
-		CAKeyPath:             caKeyPath,
+		AddressPolicyFile:         policyFile,
+		PolicyMaxRequestBytes:     policyMaximum,
+		PolicyMaxInflight:         policyInflight,
+		PolicyMaxTunnels:          policyTunnels,
+		PolicyTunnelMaxAge:        policyTunnelAge,
+		PolicyMaxConnections:      policyConnections,
+		PolicyTunnelMaxReadBytes:  policyTunnelRead,
+		PolicyTunnelMaxWriteBytes: policyTunnelWrite,
+		ListenAddr:                listenAddr,
+		Fingerprint:               fingerprint,
+		Browser:                   browserType,
+		DisableConnect:            disableConnect,
+		VerifyTargetCert:          verifyTargetCert,
+		Delegate:                  &DefaultDelegate{},
+		CertCache:                 NewDefaultCertCache(),
+		CACertPath:                caCertPath,
+		CAKeyPath:                 caKeyPath,
 	})
 	if err != nil {
 		logrus.Fatalf("创建代理服务器失败: %v", err)

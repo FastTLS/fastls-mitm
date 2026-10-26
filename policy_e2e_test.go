@@ -50,7 +50,7 @@ func enabledPolicyProxyWithLimits(t *testing.T, config any, maximum int64, limit
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{AddressPolicyFile: path, PolicyMaxRequestBytes: maximum, PolicyMaxInflight: limits.PolicyMaxInflight, PolicyMaxTunnels: limits.PolicyMaxTunnels, PolicyTunnelMaxAge: limits.PolicyTunnelMaxAge, Browser: "firefox", CACertPath: filepath.Join(directory, "ca.pem"), CAKeyPath: filepath.Join(directory, "key.pem")})
+	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{AddressPolicyFile: path, PolicyMaxRequestBytes: maximum, PolicyMaxInflight: limits.PolicyMaxInflight, PolicyMaxTunnels: limits.PolicyMaxTunnels, PolicyTunnelMaxAge: limits.PolicyTunnelMaxAge, PolicyMaxConnections: limits.PolicyMaxConnections, PolicyTunnelMaxReadBytes: limits.PolicyTunnelMaxReadBytes, PolicyTunnelMaxWriteBytes: limits.PolicyTunnelMaxWriteBytes, Browser: "firefox", CACertPath: filepath.Join(directory, "ca.pem"), CAKeyPath: filepath.Join(directory, "key.pem")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,9 @@ func enabledPolicyProxyWithLimits(t *testing.T, config any, maximum int64, limit
 	})
 	endpoint, _ := url.Parse("http://" + listener.Addr().String())
 	for deadline := time.Now().Add(3 * time.Second); ; {
-		response, err := http.Get(endpoint.String() + "/")
+		request, _ := http.NewRequest("GET", endpoint.String()+"/", nil)
+		request.Close = true
+		response, err := http.DefaultClient.Do(request)
 		if err == nil {
 			response.Body.Close()
 			break
@@ -85,6 +87,9 @@ func enabledPolicyProxyWithLimits(t *testing.T, config any, maximum int64, limit
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if limits.PolicyMaxConnections > 0 {
+		waitPolicyCondition(t, func() bool { return len(proxy.policyLimits.connections) == 0 })
 	}
 	// No request may relax the snapshot by changing the file after startup.
 	if err = os.WriteFile(path, []byte(`{}`), 0600); err != nil {
@@ -370,7 +375,7 @@ func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(directory, "mitm-ca-key.pem")); !os.IsNotExist(err) {
 				t.Fatal("failed startup created CA key")
 			}
-			for _, name := range []string{"policy-max-request-bytes", "policy-max-inflight", "policy-max-tunnels", "policy-tunnel-max-age"} {
+			for _, name := range []string{"policy-max-request-bytes", "policy-max-inflight", "policy-max-tunnels", "policy-tunnel-max-age", "policy-max-connections", "policy-tunnel-max-read-bytes", "policy-tunnel-max-write-bytes"} {
 				ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 				command := exec.CommandContext(ctx, binary, "-addr", "127.0.0.1:0", "-"+name, "0")
 				command.Dir = directory
@@ -382,6 +387,12 @@ func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(directory, "mitm-ca-key.pem")); !os.IsNotExist(err) {
 				t.Fatal("invalid resource flags created CA key")
+			}
+			if workspace != "off" {
+				if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Run("positive-connection-and-traffic-flags", func(t *testing.T) { assertMITMPolicyCLIConnectionFlags(t, binary, directory, path) })
 			}
 		})
 	}

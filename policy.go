@@ -423,7 +423,11 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 		check := &http.Request{URL: &url.URL{Scheme: "https", Host: address}, Host: address}
 		return nil, p.policy.CheckAddressPolicy(hello.Context(), check, origin)
 	}
-	tlsConn := tls.Server(conn, tlsConfig)
+	var tlsWire net.Conn = conn
+	if p.policyLimits.tunnelMaxReadBytes > 0 || p.policyLimits.tunnelMaxWriteBytes > 0 {
+		tlsWire = newPolicyTrafficConn(conn, p.policyLimits.tunnelMaxReadBytes, p.policyLimits.tunnelMaxWriteBytes)
+	}
+	tlsConn := tls.Server(tlsWire, tlsConfig)
 	handshakeCtx, stop := context.WithTimeout(tunnelCtx, 30*time.Second)
 	err = tlsConn.HandshakeContext(handshakeCtx)
 	stop()
