@@ -656,35 +656,21 @@ func newHTTP2Transport(conn net.Conn, settings *ftransport.HTTP2Config) (*ftrans
 
 // writeHTTP1Response 将 HTTP/2 响应转换为 HTTP/1.1 格式并写入客户端连接
 func (p *MITMProxy) writeHTTP1Response(clientConn net.Conn, resp *http.Response) error {
-	// 写入状态行
-	statusLine := fmt.Sprintf("HTTP/1.1 %d %s\r\n", resp.StatusCode, http.StatusText(resp.StatusCode))
-	if _, err := clientConn.Write([]byte(statusLine)); err != nil {
-		return err
+	// H2 DATA boundaries cannot delimit an H1 body. Use the standard H1
+	// encoder so an unknown-length response remains reusable and trailers
+	// are emitted only after the source reaches EOF.
+	out := *resp
+	out.Proto, out.ProtoMajor, out.ProtoMinor = "HTTP/1.1", 1, 1
+	out.Header = resp.Header.Clone()
+	out.TransferEncoding = nil
+	out.Header.Del("Transfer-Encoding")
+	hasBody := resp.StatusCode >= 200 && resp.StatusCode != 204 && resp.StatusCode != 304 && (resp.Request == nil || resp.Request.Method != "HEAD")
+	if hasBody && (resp.ContentLength < 0 || len(resp.Trailer) > 0) {
+		out.ContentLength = -1
+		out.Header.Del("Content-Length")
+		out.TransferEncoding = []string{"chunked"}
 	}
-
-	// 写入响应头
-	for key, values := range resp.Header {
-		for _, value := range values {
-			headerLine := fmt.Sprintf("%s: %s\r\n", key, value)
-			if _, err := clientConn.Write([]byte(headerLine)); err != nil {
-				return err
-			}
-		}
-	}
-
-	// 写入空行分隔头部和正文
-	if _, err := clientConn.Write([]byte("\r\n")); err != nil {
-		return err
-	}
-
-	// 写入响应体
-	if resp.Body != nil {
-		if _, err := io.Copy(clientConn, resp.Body); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return out.Write(clientConn)
 }
 
 // dialThroughProxy 通过代理建立连接

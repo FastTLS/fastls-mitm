@@ -51,36 +51,47 @@ func (c *DefaultCertCache) Get(host string) *tls.Certificate {
 }
 
 type MITMProxy struct {
-	caCert           *x509.Certificate
-	caKey            *rsa.PrivateKey
-	caCertPEM        []byte
-	caKeyPEM         []byte
-	caCertPath       string
-	caKeyPath        string
-	server           *http.Server
-	serverMu         sync.Mutex
-	tunnelMu         sync.Mutex
-	tunnels          map[net.Conn]struct{}
-	tunnelClosing    bool
-	certCache        CertCache
-	fingerprint      fastls.Fingerprint
-	browser          string
-	listenAddr       string
-	disableConnect   bool
-	verifyTargetCert bool // 是否验证目标服务器证书
-	proxyTLSRootCAs  *x509.CertPool
-	delegate         Delegate
+	policy                mitmAddressPolicy
+	policyMaxRequestBytes int64
+	policyLimits          policyLimits
+	caCert                *x509.Certificate
+	caKey                 *rsa.PrivateKey
+	caCertPEM             []byte
+	caKeyPEM              []byte
+	caCertPath            string
+	caKeyPath             string
+	server                *http.Server
+	serverMu              sync.Mutex
+	tunnelMu              sync.Mutex
+	tunnels               map[net.Conn]struct{}
+	tunnelClosing         bool
+	certCache             CertCache
+	fingerprint           fastls.Fingerprint
+	browser               string
+	listenAddr            string
+	disableConnect        bool
+	verifyTargetCert      bool // 是否验证目标服务器证书
+	proxyTLSRootCAs       *x509.CertPool
+	delegate              Delegate
 }
 
 // NewMITMProxyOptions MITMProxy 配置选项
 type NewMITMProxyOptions struct {
-	ListenAddr       string
-	Fingerprint      fastls.Fingerprint
-	Browser          string
-	DisableConnect   bool
-	VerifyTargetCert bool // 是否验证目标服务器证书
-	Delegate         Delegate
-	CertCache        CertCache
+	// AddressPolicyFile is trusted startup configuration, never a request header.
+	AddressPolicyFile string
+	// PolicyMaxRequestBytes is 0 for the policy-mode default of 4 MiB.
+	PolicyMaxRequestBytes int64
+	// Policy resource limits are opt-in startup settings; zero disables each.
+	PolicyMaxInflight  int
+	PolicyMaxTunnels   int
+	PolicyTunnelMaxAge time.Duration
+	ListenAddr         string
+	Fingerprint        fastls.Fingerprint
+	Browser            string
+	DisableConnect     bool
+	VerifyTargetCert   bool // 是否验证目标服务器证书
+	Delegate           Delegate
+	CertCache          CertCache
 	// CACertPath and CAKeyPath override the default on-disk CA paths. They are
 	// primarily useful for isolated development and test instances.
 	CACertPath string
@@ -104,6 +115,14 @@ func NewMITMProxy(listenAddr string, fingerprint fastls.Fingerprint, browser str
 
 // NewMITMProxyWithOptions 使用配置选项创建 MITM 代理服务器
 func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
+	limits, err := newPolicyLimits(opts)
+	if err != nil {
+		return nil, err
+	}
+	policy, maximum, err := loadMITMAddressPolicy(opts.AddressPolicyFile, opts.PolicyMaxRequestBytes)
+	if err != nil {
+		return nil, err
+	}
 	if opts.Delegate == nil {
 		opts.Delegate = &DefaultDelegate{}
 	}
@@ -112,17 +131,20 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 	}
 
 	proxy := &MITMProxy{
-		certCache:        opts.CertCache,
-		listenAddr:       opts.ListenAddr,
-		fingerprint:      opts.Fingerprint,
-		browser:          opts.Browser,
-		disableConnect:   opts.DisableConnect,
-		verifyTargetCert: opts.VerifyTargetCert,
-		delegate:         opts.Delegate,
-		caCertPath:       opts.CACertPath,
-		caKeyPath:        opts.CAKeyPath,
-		proxyTLSRootCAs:  opts.ProxyTLSRootCAs,
-		tunnels:          make(map[net.Conn]struct{}),
+		policy:                policy,
+		policyMaxRequestBytes: maximum,
+		policyLimits:          limits,
+		certCache:             opts.CertCache,
+		listenAddr:            opts.ListenAddr,
+		fingerprint:           opts.Fingerprint,
+		browser:               opts.Browser,
+		disableConnect:        opts.DisableConnect,
+		verifyTargetCert:      opts.VerifyTargetCert,
+		delegate:              opts.Delegate,
+		caCertPath:            opts.CACertPath,
+		caKeyPath:             opts.CAKeyPath,
+		proxyTLSRootCAs:       opts.ProxyTLSRootCAs,
+		tunnels:               make(map[net.Conn]struct{}),
 	}
 
 	if err := proxy.generateCA(); err != nil {
@@ -133,6 +155,10 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 }
 
 func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if p.policy != nil {
+		p.handlePolicyConnect(w, r)
+		return
+	}
 	host := r.Host
 	if host == "" {
 		host = r.URL.Host
@@ -341,6 +367,10 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.policy != nil {
+		p.handlePolicyHTTP(w, r, "")
+		return
+	}
 	if r.URL.Host != "" && r.URL.Scheme == "" && r.URL.Path == "" {
 		logTunnel("检测到可能的CONNECT请求（URL格式: %s），重定向到handleConnect", r.URL.Host)
 		if r.Host != "" {
@@ -522,11 +552,9 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		httpResp = &http.Response{
 			StatusCode: resp.Status,
-			Header:     make(http.Header),
+			Header:     http.Header(resp.HeaderValues).Clone(),
 			Body:       resp.Body,
-		}
-		for k, v := range resp.Headers {
-			httpResp.Header.Set(k, v)
+			Trailer:    resp.Trailer,
 		}
 	}
 
@@ -550,6 +578,12 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// 使用修改后的响应
 	if httpResp != nil {
+		if len(httpResp.Trailer) > 0 {
+			httpResp.Header.Del("Content-Length")
+			for name := range httpResp.Trailer {
+				httpResp.Header.Add("Trailer", name)
+			}
+		}
 		for key, values := range httpResp.Header {
 			for _, value := range values {
 				w.Header().Add(key, value)
@@ -558,7 +592,14 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(httpResp.StatusCode)
 		statusText := http.StatusText(httpResp.StatusCode)
 		logResponse(r.Method, targetURL, httpResp.StatusCode, statusText, nil)
-		io.Copy(w, httpResp.Body)
+		if _, copyErr := io.Copy(w, httpResp.Body); copyErr != nil {
+			p.delegate.ErrorLog(copyErr)
+			p.delegate.Finish(ctx)
+			panic(http.ErrAbortHandler)
+		}
+		for name, values := range httpResp.Trailer {
+			w.Header()[name] = append([]string(nil), values...)
+		}
 	} else {
 		for key, value := range resp.Headers {
 			w.Header().Set(key, value)
@@ -575,10 +616,14 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (p *MITMProxy) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		logDebug("收到请求: %s %s (Method: %s, Host: %s, URL: %s)", r.Method, r.URL.Path, r.Method, r.Host, r.URL.String())
+		if p.policy == nil {
+			logDebug("收到请求: %s %s (Method: %s, Host: %s, URL: %s)", r.Method, r.URL.Path, r.Method, r.Host, r.URL.String())
+		}
 
 		if r.Method == http.MethodConnect {
-			logDebug("处理CONNECT请求: %s", r.Host)
+			if p.policy == nil {
+				logDebug("处理CONNECT请求: %s", r.Host)
+			}
 			p.handleConnect(w, r)
 			return
 		}
@@ -646,6 +691,13 @@ func (p *MITMProxy) serve(listener net.Listener) error {
 
 func (p *MITMProxy) prepareServer(listener net.Listener) (*http.Server, error) {
 	server := &http.Server{Addr: listener.Addr().String(), Handler: p.handler()}
+	if p.policy != nil {
+		server.MaxHeaderBytes = 64 << 10
+		server.ReadHeaderTimeout = 30 * time.Second
+		server.ReadTimeout = 30 * time.Second
+		server.WriteTimeout = 30 * time.Second
+		server.IdleTimeout = 30 * time.Second
+	}
 	p.serverMu.Lock()
 	if p.server != nil {
 		p.serverMu.Unlock()
