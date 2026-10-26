@@ -1,158 +1,98 @@
-# MITM代理客户端示例
+# MITM 客户端接入
 
-本目录包含使用 Fastls MITM代理的客户端示例，支持 Python、Golang 和 Node.js。
+仅用于授权测试。先按 [主指南](../README.md) 启动代理，显式限定环回地址并开启目标证书校验：
 
-## 启动MITM代理
-
-```bash
-cd fastls-mitm
-go run . -addr :8888 -browser chrome142
-# 或
-./fastls-mitm.exe -addr :8888 -browser chrome142
+```sh
+go run . -addr 127.0.0.1:8888 -browser chrome -verify-cert
 ```
 
-代理默认运行在 `http://127.0.0.1:8888`
+从仓库根运行，生成的 mitm-ca-cert.pem 是客户端需要信任的 CA；mitm-ca-key.pem 是私钥，只留在代理端。本目录历史独立脚本仅供接口追溯，运行前须复核其证书处理；优先使用下面保持证书验证的示例。
 
-## 安装CA证书
+## curl
 
-使用MITM代理前，需要安装生成的CA证书：
-
-1. 启动代理后，会在当前目录生成 `mitm-ca-cert.pem`
-2. 将证书添加到系统信任的根证书颁发机构
-3. 或者使用 `verify=False` 忽略证书验证（仅用于测试）
-
-## Python 客户端
-
-### 安装依赖
-
-```bash
-pip install requests
+```sh
+curl --proxy http://127.0.0.1:8888 --cacert mitm-ca-cert.pem https://example.com/
 ```
 
-### 运行示例
+## Python
 
-```bash
-python python_client.py
-```
-
-### 使用示例
+安装 requests，在包含 CA 文件的目录运行：
 
 ```python
 import requests
 
-# 通过MITM代理发送请求
-response = requests.get(
-    "https://example.com",
-    proxies={
-        "http": "http://127.0.0.1:8888",
-        "https": "http://127.0.0.1:8888"
-    },
-    verify=False  # 忽略SSL证书验证
-)
-print(response.text)
+with requests.Session() as session:
+    session.proxies = {"http": "http://127.0.0.1:8888", "https": "http://127.0.0.1:8888"}
+    session.verify = "mitm-ca-cert.pem"
+    response = session.get("https://example.com/", timeout=30)
+    response.raise_for_status()
+    print(response.text)
 ```
 
-## Golang 客户端
+## Go
 
-### 运行示例
-
-```bash
-go run go_client.go
-```
-
-### 使用示例
+客户端使用标准 net/http，与代理的 Fastls 出站配置无关：
 
 ```go
 package main
 
 import (
     "crypto/tls"
+    "crypto/x509"
+    "fmt"
+    "io"
     "net/http"
+    "net/url"
+    "os"
+    "time"
 )
 
 func main() {
-    client := &http.Client{
-        Transport: &http.Transport{
-            Proxy: http.ProxyURL("http://127.0.0.1:8888"),
-            TLSClientConfig: &tls.Config{
-                InsecureSkipVerify: true,
-            },
-        },
+    if err := run(); err != nil { fmt.Fprintln(os.Stderr, err); os.Exit(1) }
+}
+
+func run() error {
+    pem, err := os.ReadFile("mitm-ca-cert.pem")
+    if err != nil { return err }
+    roots := x509.NewCertPool()
+    if !roots.AppendCertsFromPEM(pem) { return fmt.Errorf("invalid proxy CA") }
+    proxy, err := url.Parse("http://127.0.0.1:8888")
+    if err != nil { return err }
+    transport := &http.Transport{
+        Proxy: http.ProxyURL(proxy),
+        TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
     }
-    
-    resp, _ := client.Get("https://example.com")
-    // 处理响应...
+    defer transport.CloseIdleConnections()
+    client := &http.Client{Transport: transport, Timeout: 30*time.Second}
+    response, err := client.Get("https://example.com/")
+    if err != nil { return err }
+    defer response.Body.Close()
+    _, err = io.Copy(os.Stdout, response.Body)
+    return err
 }
 ```
 
-## Node.js 客户端
+## Node.js
 
-### 运行示例
+Node 的 https.request 没有通用 proxy 配置字段。安装 `https-proxy-agent`，保存为 client.mjs 后运行；CA 通过目标 TLS 选项传入：
 
-```bash
-node nodejs_client.js
-```
+```js
+import https from 'node:https';
+import { readFileSync } from 'node:fs';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
-### 使用axios（推荐）
-
-```bash
-npm install axios
-```
-
-```javascript
-const axios = require('axios');
-const https = require('https');
-
-axios.get('https://example.com', {
-    proxy: {
-        host: '127.0.0.1',
-        port: 8888
-    },
-    httpsAgent: new https.Agent({
-        rejectUnauthorized: false
-    })
-})
-.then(response => {
-    console.log(response.data);
+const agent = new HttpsProxyAgent('http://127.0.0.1:8888');
+const request = https.get('https://example.com/', {
+  agent,
+  ca: readFileSync('mitm-ca-cert.pem'),
+}, response => {
+  console.log(response.statusCode);
+  response.pipe(process.stdout);
+  response.on('end', () => agent.destroy());
+  response.on('error', error => { console.error(error); agent.destroy(); process.exitCode = 1; });
 });
+request.setTimeout(30_000, () => request.destroy(new Error('request timed out')));
+request.on('error', error => { console.error(error); agent.destroy(); process.exitCode = 1; });
 ```
 
-## 代理参数
-
-启动MITM代理时可以使用的参数：
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `-addr` | 监听地址 | `:8888` |
-| `-browser` | 浏览器类型 | `chrome142` |
-| `-ja3` | 自定义JA3指纹 | 空 |
-| `-ja4r` | 自定义JA4R指纹 | 空 |
-| `-ca-cert` | CA证书路径 | `mitm-ca-cert.pem` |
-| `-ca-key` | CA私钥路径 | `mitm-ca-key.pem` |
-
-## 支持的浏览器类型
-
-- 滚动别名：`chrome`、`edge`、`firefox`、`chromium`、`safari`、`opera`
-- 版本选择器：`chrome150`…`chrome160`、`edge150`…`edge160`、`firefox151`…`firefox158`
-- 兼容保留：`chrome120`、`chrome142`、`firefox144`、`firefox147`、`firefox148`
-
-## 注意事项
-
-1. **证书安装**: 使用HTTPS时，需要安装MITM代理生成的CA证书
-2. **证书验证**: 生产环境应正确安装证书，测试环境可以使用 `verify=False`
-3. **代理地址**: 确保代理地址和端口与启动参数一致
-4. **防火墙**: 确保防火墙允许代理端口通信
-5. **TLS指纹**: 代理会根据启动参数设置TLS指纹，影响与目标服务器的连接
-
-## 使用场景
-
-- 网络流量分析
-- TLS指纹测试
-- 中间人攻击测试（合法授权）
-- 调试HTTPS通信
-- 安全研究
-
-## 安全提示
-
-⚠️ **警告**: MITM代理可以拦截和修改HTTPS流量，仅应在合法授权的环境中使用。
-
+不要使用 verify=False、InsecureSkipVerify 或 rejectUnauthorized=false 代替信任 CA。请求级指纹配置、上级代理及委托模式见 [MITM_PROXY.md](../MITM_PROXY.md) 和 [DELEGATE_EXAMPLE.md](../DELEGATE_EXAMPLE.md)。这些配置由可信调用方控制；浏览器选择器以安装版本帮助为准，不表示完整浏览器一致性。
