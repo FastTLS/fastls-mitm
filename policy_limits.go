@@ -11,12 +11,24 @@ import (
 // policyLimits is immutable after startup. Channels reserve admission before
 // body buffering / DNS / certificate preparation, without an unbounded queue.
 type policyLimits struct {
-	requests     chan struct{}
-	tunnels      chan struct{}
-	tunnelMaxAge time.Duration
+	connections         chan struct{}
+	requests            chan struct{}
+	tunnels             chan struct{}
+	tunnelMaxAge        time.Duration
+	tunnelMaxReadBytes  int64
+	tunnelMaxWriteBytes int64
 }
 
 func newPolicyLimits(opts NewMITMProxyOptions) (policyLimits, error) {
+	if opts.PolicyMaxConnections < 0 || opts.PolicyMaxConnections > 65536 {
+		return policyLimits{}, errors.New("policy-max-connections must be 0..65536")
+	}
+	if opts.PolicyTunnelMaxReadBytes < 0 || opts.PolicyTunnelMaxReadBytes > 1<<40 {
+		return policyLimits{}, errors.New("policy-tunnel-max-read-bytes must be 0..1099511627776")
+	}
+	if opts.PolicyTunnelMaxWriteBytes < 0 || opts.PolicyTunnelMaxWriteBytes > 1<<40 {
+		return policyLimits{}, errors.New("policy-tunnel-max-write-bytes must be 0..1099511627776")
+	}
 	if opts.PolicyMaxInflight < 0 || opts.PolicyMaxInflight > 65536 {
 		return policyLimits{}, errors.New("policy-max-inflight must be 0..65536")
 	}
@@ -26,10 +38,13 @@ func newPolicyLimits(opts NewMITMProxyOptions) (policyLimits, error) {
 	if opts.PolicyTunnelMaxAge < 0 || opts.PolicyTunnelMaxAge > 24*time.Hour {
 		return policyLimits{}, errors.New("policy-tunnel-max-age must be 0..24h")
 	}
-	if opts.AddressPolicyFile == "" && (opts.PolicyMaxInflight != 0 || opts.PolicyMaxTunnels != 0 || opts.PolicyTunnelMaxAge != 0) {
+	if opts.AddressPolicyFile == "" && (opts.PolicyMaxConnections != 0 || opts.PolicyMaxInflight != 0 || opts.PolicyMaxTunnels != 0 || opts.PolicyTunnelMaxAge != 0 || opts.PolicyTunnelMaxReadBytes != 0 || opts.PolicyTunnelMaxWriteBytes != 0) {
 		return policyLimits{}, errors.New("policy resource limits require address-policy")
 	}
-	limits := policyLimits{tunnelMaxAge: opts.PolicyTunnelMaxAge}
+	limits := policyLimits{tunnelMaxAge: opts.PolicyTunnelMaxAge, tunnelMaxReadBytes: opts.PolicyTunnelMaxReadBytes, tunnelMaxWriteBytes: opts.PolicyTunnelMaxWriteBytes}
+	if opts.PolicyMaxConnections > 0 {
+		limits.connections = make(chan struct{}, opts.PolicyMaxConnections)
+	}
 	if opts.PolicyMaxInflight > 0 {
 		limits.requests = make(chan struct{}, opts.PolicyMaxInflight)
 	}

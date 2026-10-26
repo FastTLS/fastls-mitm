@@ -11,6 +11,10 @@ import (
 
 func TestPolicyResourceConfigurationFailsBeforeCA(t *testing.T) {
 	for _, config := range []NewMITMProxyOptions{
+		{PolicyMaxConnections: 1}, {PolicyTunnelMaxReadBytes: 1}, {PolicyTunnelMaxWriteBytes: 1},
+		{AddressPolicyFile: "missing", PolicyMaxConnections: -1}, {AddressPolicyFile: "missing", PolicyMaxConnections: 65537},
+		{AddressPolicyFile: "missing", PolicyTunnelMaxReadBytes: -1}, {AddressPolicyFile: "missing", PolicyTunnelMaxReadBytes: 1<<40 + 1},
+		{AddressPolicyFile: "missing", PolicyTunnelMaxWriteBytes: -1}, {AddressPolicyFile: "missing", PolicyTunnelMaxWriteBytes: 1<<40 + 1},
 		{PolicyMaxInflight: 1}, {PolicyMaxTunnels: 1}, {PolicyTunnelMaxAge: time.Second},
 		{AddressPolicyFile: "missing", PolicyMaxInflight: -1}, {AddressPolicyFile: "missing", PolicyMaxInflight: 65537},
 		{AddressPolicyFile: "missing", PolicyMaxTunnels: -1}, {AddressPolicyFile: "missing", PolicyMaxTunnels: 65537},
@@ -28,7 +32,7 @@ func TestPolicyResourceConfigurationFailsBeforeCA(t *testing.T) {
 			t.Fatal("invalid startup created CA material")
 		}
 	}
-	if _, err := newPolicyLimits(NewMITMProxyOptions{AddressPolicyFile: "trusted", PolicyMaxInflight: 65536, PolicyMaxTunnels: 65536, PolicyTunnelMaxAge: 24 * time.Hour}); err != nil {
+	if _, err := newPolicyLimits(NewMITMProxyOptions{AddressPolicyFile: "trusted", PolicyMaxConnections: 65536, PolicyTunnelMaxReadBytes: 1 << 40, PolicyTunnelMaxWriteBytes: 1 << 40, PolicyMaxInflight: 65536, PolicyMaxTunnels: 65536, PolicyTunnelMaxAge: 24 * time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 }

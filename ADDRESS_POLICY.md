@@ -52,6 +52,28 @@ Delegate.Connect/Auth负责CONNECT；每条解密HTTP分别调用BeforeRequest�
 
 本模式直接返回上游3xx，由调用者决定下一次请求；下一次经代理的请求再次校验。不会替客户端自动跟随Location。上游正文截断会终止下游响应，不伪装为正常EOF。普通旧模式仍保持旧行为，不因新增选项自动改变。
 
+## 接入连接数与隧道累计字节（P03-B5开发源码）
+
+这些选项同样只从可信启动配置读取，默认0禁用，显式CLI参数需address-policy；非法值在生成CA/监听前拒绝。
+
+- `-policy-max-connections N` / `PolicyMaxConnections`：0..65536。限制本实例用户态接入TCP连接总数，包含未完成HTTP头、HTTP keepalive、普通活动请求以及劫持后的CONNECT。满额时Accept后立即关闭新连接，不进入HTTP解析、不排队，所以不是HTTP503；健康请求也需连接名额，不应误当作服务故障。已有连接关闭后才能接入替代连接。它不限制内核backlog或TCP握手包，也不是出站池大小限制。
+- `-policy-tunnel-max-read-bytes N` / `PolicyTunnelMaxReadBytes`：0..1099511627776（1TiB）。每个CONNECT累计从客户端交付给TLS服务器的字节上限。
+- `-policy-tunnel-max-write-bytes N` / `PolicyTunnelMaxWriteBytes`：相同范围。每个CONNECT累计由TLS服务器实际写向客户端的字节上限。
+
+两个字节预算独立，并非共用一个总池；如需双向有限，应分别设置，二者之和是该隧道两个方向的配置上界。握手、TLS记录开销与已被HTTP服务器预读的ClientHello都计入；CONNECT请求/200不计入。该口径不含TCP包头、重传、内核已接收但尚未交付TLS层的数据，也不等于应用解压后正文或全实例流量。普通HTTP不属于CONNECT字节预算。
+
+预算跨同一隧道内的多次请求累计，不因活动或请求结束重置。任一方向达到上限即关闭整个套接字并取消活动出站；不会保证最后一条TLS记录或HTTP正文完整，不追加成功响应或静默重连。调用方必须检查读取/握手错误。读取与写入分别串行计费，不因后台阻塞Read占用发送额度而死锁。
+
+接入连接名额在底层关闭时幂等归还；请求/隧道名额在对应处理退出时归还。Shutdown宽限期到期后，策略模式强制关闭普通连接，避免未完成请求头或慢请求继续持有名额，同时仍返回原deadline错误；不能把强制清理表述为优雅完成。已劫持隧道仍由原登记表关闭。
+
+例如，已链接新核心的开发二进制可使用以下启动配置（先准备上文策略文件；当前正式Release不包含这些选项）：
+
+```text
+fastls-mitm -addr 127.0.0.1:8888 -address-policy policy.json -policy-max-connections 128 -policy-max-inflight 16 -policy-max-tunnels 32 -policy-tunnel-max-age 5m -policy-tunnel-max-read-bytes 16777216 -policy-tunnel-max-write-bytes 67108864
+```
+
+连接额度还需容纳健康检查、普通HTTP和空闲连接，不要只按活跃CONNECT数量配置。TLS握手也会消耗字节预算，过小的值会在访问任何目标之前中断握手。
+
 ## 错误、网关链路与日志
 
 策略拒绝为HTTP403，带`X-Proxy-Error: address_denied`和`X-Proxy-Error-Reason`；正文只含固定Reason，不回显目标URL凭据或查询。其他上游/父代理选择错误为通用502。TLS SNI/ALPN拒绝发生在握手阶段，关闭连接而非伪造一条已加密HTTP响应。不是完整审计或所有现有日志已脱敏的声明。
@@ -62,4 +84,4 @@ Fetch/JSON-RPC/gRPC可在自身策略关闭时通过本受限MITM作为parent_pr
 
 默认独立构建门禁覆盖旧核心拒绝及原代理兼容；显式工作区使用`go test -count=3 -tags mitm_policy_e2e -timeout 180s ./...`验证生效能力。覆盖CONNECT前拒绝、实际目标TCP连接计数、SNI/origin越界、H1/H2、二进制/Trailer、精确请求限额、流水ClientHello、认证和停机取消。RPC的policy_e2e包含三入口经受限MITM链路。缺少新核心时正向门禁失败，不跳过。
 
-仍未完成正式核心依赖升级、远端矩阵验收、全局TCP连接数/隧道累计流量配额、完整审计接口及FFI完整Spec输入。Fetch/RPC请求大小配置与本模式的请求/隧道并发、寿命限制已在开发源码增加。本轮不发布或签发新产物。
+仍未完成正式核心依赖升级、生效策略跨仓远端矩阵验收、速率/全实例累计流量限制、完整审计接口及FFI完整Spec输入。Fetch/RPC请求大小配置与本模式的请求/隧道并发、寿命、接入TCP名额及双向累计TLS字节预算已在开发源码增加；Fetch/RPC仍没有这里的全局接入TCP名额。本轮不发布或签发新产物。

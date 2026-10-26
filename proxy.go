@@ -82,16 +82,19 @@ type NewMITMProxyOptions struct {
 	// PolicyMaxRequestBytes is 0 for the policy-mode default of 4 MiB.
 	PolicyMaxRequestBytes int64
 	// Policy resource limits are opt-in startup settings; zero disables each.
-	PolicyMaxInflight  int
-	PolicyMaxTunnels   int
-	PolicyTunnelMaxAge time.Duration
-	ListenAddr         string
-	Fingerprint        fastls.Fingerprint
-	Browser            string
-	DisableConnect     bool
-	VerifyTargetCert   bool // 是否验证目标服务器证书
-	Delegate           Delegate
-	CertCache          CertCache
+	PolicyMaxInflight         int
+	PolicyMaxTunnels          int
+	PolicyTunnelMaxAge        time.Duration
+	PolicyMaxConnections      int
+	PolicyTunnelMaxReadBytes  int64
+	PolicyTunnelMaxWriteBytes int64
+	ListenAddr                string
+	Fingerprint               fastls.Fingerprint
+	Browser                   string
+	DisableConnect            bool
+	VerifyTargetCert          bool // 是否验证目标服务器证书
+	Delegate                  Delegate
+	CertCache                 CertCache
 	// CACertPath and CAKeyPath override the default on-disk CA paths. They are
 	// primarily useful for isolated development and test instances.
 	CACertPath string
@@ -715,6 +718,9 @@ func (p *MITMProxy) prepareServer(listener net.Listener) (*http.Server, error) {
 }
 
 func (p *MITMProxy) servePrepared(server *http.Server, listener net.Listener) error {
+	if p.policy != nil && p.policyLimits.connections != nil {
+		listener = &policyLimitedListener{Listener: listener, slots: p.policyLimits.connections}
+	}
 	err := server.Serve(listener)
 	p.serverMu.Lock()
 	if p.server == server {
@@ -738,7 +744,13 @@ func (p *MITMProxy) Shutdown(ctx context.Context) error {
 	if server == nil {
 		return nil
 	}
-	return server.Shutdown(ctx)
+	err := server.Shutdown(ctx)
+	if err != nil && p.policy != nil {
+		// The graceful window ended. Close pre-header and ordinary active
+		// connections as well; their leases must not outlive policy shutdown.
+		_ = server.Close()
+	}
+	return err
 }
 
 func (p *MITMProxy) Stop() error {

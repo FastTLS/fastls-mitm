@@ -52,6 +52,8 @@ go build -o build/fastls-mitm .
 
 ## 变更约定
 
+策略资源选项需要显式新核心工作区验证：运行`go test -count=3 -tags mitm_policy_e2e -timeout 180s ./...`与对应race。连接测试要包含请求头未完成、keepalive和劫持后的租约保留；流量测试要包含预读ClientHello、握手、同隧道多请求累计、截断错误和出站取消。`FuzzPolicyTrafficBudget`是无网络纯字节回归，普通公开依赖质量Action也会运行20秒；不要把GOWORK=off的旧核心拒绝用例当成策略已生效。
+
 - 修改命令参数时同步 `help.go`、README 和示例。
 - 修改动态请求头时同步代理文档并增加优先级测试。
 - 修改指纹选择范围时覆盖规范选择器、兼容别名和无效输入。
