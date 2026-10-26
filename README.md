@@ -2,7 +2,11 @@
 
 中间人代理服务器，支持 TLS 指纹伪造。
 
-> 当前状态：`v0.1.0` 正式版。正式产物只在 GitHub Releases 发布；其他软件包、镜像和应用商店不在发布范围内。
+> 当前状态：[`v0.1.0`](https://github.com/FastTLS/fastls-mitm/releases/tag/v0.1.0) 正式版。正式产物只在 GitHub Releases 发布；其他软件包、镜像和应用商店不在发布范围内。
+
+当前开发分支修复普通HTTP代理的重复响应头/Trailer转发，以及H2转H1时未知长度正文的分块与Trailer编码。修复使用标准H1响应编码器，并在上游正文截断时终止下游响应，避免伪装成成功EOF；这些变更尚未发布。
+
+开发源码另提供[MITM地址策略模式](ADDRESS_POLICY.md)：CONNECT前预检、SNI/隧道目标绑定、逐请求核心受控转发和有限正文缓存；还可分别配置HTTP请求并发、CONNECT名额及隧道总寿命。使用当前公开核心时会拒绝启用；默认旧路径保持不变。它不开放父代理、Upgrade或透明转发，不提供累计流量配额和完整审计；这些能力尚未发布。
 
 文档导航：[详细代理说明](./MITM_PROXY.md) · [委托模式](./DELEGATE_EXAMPLE.md) · [客户端示例](./example/README.md) · [开发流程](./DEVELOPMENT.md) · [产物签发验证](./ARTIFACTS.md)
 

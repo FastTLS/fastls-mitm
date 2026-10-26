@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	fastls "github.com/FastTLS/fastls"
 	"github.com/sirupsen/logrus"
@@ -25,11 +26,21 @@ func main() {
 		debug            bool
 		showVersion      bool
 		showHelp         bool
+		policyFile       string
+		policyMaximum    int64
+		policyInflight   int
+		policyTunnels    int
+		policyTunnelAge  time.Duration
 	)
 
 	// 定义完整参数和缩写参数
 	flag.StringVar(&listenAddr, "addr", ":8888", "监听地址 (例如: :8888 或 0.0.0.0:8888)")
 	flag.StringVar(&listenAddr, "a", ":8888", "监听地址 (addr 的缩写)")
+	flag.StringVar(&policyFile, "address-policy", "", "Trusted address policy JSON file; unsupported cores refuse startup")
+	flag.Int64Var(&policyMaximum, "policy-max-request-bytes", 4<<20, "Buffered request limit in policy mode (1..64 MiB); requires address-policy")
+	flag.IntVar(&policyInflight, "policy-max-inflight", 0, "Maximum active policy HTTP requests; 0 is unlimited; requires address-policy")
+	flag.IntVar(&policyTunnels, "policy-max-tunnels", 0, "Maximum admitted policy CONNECT tunnels; 0 is unlimited; requires address-policy")
+	flag.DurationVar(&policyTunnelAge, "policy-tunnel-max-age", 0, "Maximum policy tunnel lifetime (0..24h); 0 disables; requires address-policy")
 
 	flag.StringVar(&browser, "browser", "chrome142", "浏览器类型 (chrome/chrome160, chrome150..160, edge/edge160, edge150..160, firefox/firefox158, firefox151..158, safari, opera)")
 	flag.StringVar(&browser, "b", "chrome142", "浏览器类型 (browser 的缩写)")
@@ -76,6 +87,18 @@ func main() {
 		printVersion()
 		os.Exit(0)
 	}
+	if policyFile == "" {
+		explicitMaximum := false
+		flag.Visit(func(f *flag.Flag) {
+			if strings.HasPrefix(f.Name, "policy-") {
+				explicitMaximum = true
+			}
+		})
+		if explicitMaximum {
+			logrus.Fatal("policy resource flags require address-policy")
+		}
+		policyMaximum = 0
+	}
 
 	setupLogging(debug)
 
@@ -95,15 +118,20 @@ func main() {
 	}
 
 	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{
-		ListenAddr:       listenAddr,
-		Fingerprint:      fingerprint,
-		Browser:          browserType,
-		DisableConnect:   disableConnect,
-		VerifyTargetCert: verifyTargetCert,
-		Delegate:         &DefaultDelegate{},
-		CertCache:        NewDefaultCertCache(),
-		CACertPath:       caCertPath,
-		CAKeyPath:        caKeyPath,
+		AddressPolicyFile:     policyFile,
+		PolicyMaxRequestBytes: policyMaximum,
+		PolicyMaxInflight:     policyInflight,
+		PolicyMaxTunnels:      policyTunnels,
+		PolicyTunnelMaxAge:    policyTunnelAge,
+		ListenAddr:            listenAddr,
+		Fingerprint:           fingerprint,
+		Browser:               browserType,
+		DisableConnect:        disableConnect,
+		VerifyTargetCert:      verifyTargetCert,
+		Delegate:              &DefaultDelegate{},
+		CertCache:             NewDefaultCertCache(),
+		CACertPath:            caCertPath,
+		CAKeyPath:             caKeyPath,
 	})
 	if err != nil {
 		logrus.Fatalf("创建代理服务器失败: %v", err)
