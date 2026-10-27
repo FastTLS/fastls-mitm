@@ -58,6 +58,8 @@ with requests.Session() as session:
 
 ## 更多文档
 
+[开发源码地址策略与资源限额](ADDRESS_POLICY.md)：包含新核心下的 CONNECT 检查、接入连接、请求与隧道配额。当前正式发布包不含这些选项；默认依赖和显式开发工作区分别验证。
+
 [代理参数与行为](MITM_PROXY.md) · [委托示例](DELEGATE_EXAMPLE.md) · [客户端示例](example/README.md) · [源码开发](DEVELOPMENT.md) · [产物验证](ARTIFACTS.md)
 
 ## 详细文档与问题反馈
