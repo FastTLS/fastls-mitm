@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"github.com/FastTLS/fastls-mitm/internal/audit"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/FastTLS/ftransport"
@@ -110,7 +113,7 @@ func (p *MITMProxy) serveDefaultTunnel(clientConn net.Conn, outer *Context) {
 				http.Error(w, "invalid request order", http.StatusBadRequest)
 				return
 			}
-			response, err := transport.RoundTrip(prepared)
+			response, err := roundTripDefaultTunnel(transport, prepared)
 			if err != nil {
 				code, phase := audit.Error(err, "request_error")
 				audit.Result(ctx, "", 0, code, phase)
@@ -126,6 +129,27 @@ func (p *MITMProxy) serveDefaultTunnel(clientConn net.Conn, outer *Context) {
 	}
 	defer server.Close()
 	_ = server.Serve(listener)
+}
+
+// A peer may close a pooled connection while the next request acquires it.
+// Replay only bodyless safe methods, once, before any response is returned.
+// The same transport preserves the dial policy and original request deadline.
+func roundTripDefaultTunnel(transport http.RoundTripper, request *http.Request) (*http.Response, error) {
+	var reused atomic.Bool
+	trace := &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { reused.Store(info.Reused) }}
+	traced := request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	response, err := transport.RoundTrip(traced)
+	if response != nil || err == nil || !reused.Load() || request.Context().Err() != nil ||
+		(request.Method != http.MethodGet && request.Method != http.MethodHead) ||
+		(request.Body != nil && request.Body != http.NoBody) || request.ContentLength > 0 ||
+		len(request.TransferEncoding) != 0 || len(request.Trailer) != 0 ||
+		(!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) {
+		return response, err
+	}
+	if closer, ok := transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+	return transport.RoundTrip(traced)
 }
 
 // Transfer ownership of the already fingerprinted TLS connection. The
