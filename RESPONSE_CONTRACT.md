@@ -25,6 +25,13 @@ client TLS handshake, decrypted header reads and keepalive idle waits have a
 failure before response headers produces 502; a failure after response headers
 aborts the connection. A successful status line alone never certifies the body.
 
+Default CONNECT forwarding can make one additional RoundTrip when an actually
+reused connection returns EOF or UnexpectedEOF before any response. This is
+limited to GET/HEAD without a body, transfer encoding or trailers, and keeps
+the original context, deadline and transport dial configuration. New-connection
+failures, other methods, status codes and response-body errors are not replayed
+by this recovery path; it is not a general retry policy.
+
 Plain HTTP bodies are streamed through the core session API. The proxy does
 not buffer a request body into an unbounded string. Policy mode retains its
 separate bounded request buffering, origin checks and fail-closed startup.
