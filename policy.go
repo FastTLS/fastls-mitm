@@ -225,6 +225,19 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 			delete(options.Headers, name)
 			continue
 		}
+		// Profile normalization mirrors the first HeaderValues item into
+		// Headers. That mirror is not a delegate edit and must not flatten
+		// repeated caller fields (including in decrypted CONNECT requests).
+		unchanged := false
+		for existing, values := range options.HeaderValues {
+			if strings.EqualFold(existing, name) && len(values) > 0 && values[0] == value {
+				unchanged = true
+				break
+			}
+		}
+		if unchanged {
+			continue
+		}
 		// Explicit delegate header edits override the copied multi-value view.
 		for existing := range options.HeaderValues {
 			if strings.EqualFold(existing, name) {
@@ -285,23 +298,7 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 		writePolicyError(w, proxyPolicyError("upgrade_unsupported"))
 		return
 	}
-	headers := policyHeaders(out.Header)
-	if len(out.Trailer) > 0 {
-		headers.Del("Content-Length")
-		for name := range out.Trailer {
-			headers.Add("Trailer", name)
-		}
-	}
-	for name, values := range headers {
-		w.Header()[name] = append([]string(nil), values...)
-	}
-	w.WriteHeader(out.StatusCode)
-	if _, err = io.Copy(w, out.Body); err != nil {
-		panic(http.ErrAbortHandler)
-	}
-	for name, values := range out.Trailer {
-		w.Header()[name] = append([]string(nil), values...)
-	}
+	writeProxyResponse(w, out)
 }
 
 func clonePolicyStrings(source map[string]string) map[string]string {

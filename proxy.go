@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"crypto/tls"
@@ -16,7 +17,6 @@ import (
 	"time"
 
 	fastls "github.com/FastTLS/fastls"
-	utls "github.com/refraction-networking/utls"
 	"github.com/sirupsen/logrus"
 )
 
@@ -232,7 +232,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, buffered, err := hijacker.Hijack()
 	if err != nil {
 		logResponse("CONNECT", host, http.StatusInternalServerError, "Internal Server Error", err)
 		logDebug("Hijack失败: %v", err)
@@ -242,6 +242,15 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	prefix := make([]byte, buffered.Reader.Buffered())
+	if _, err = io.ReadFull(buffered.Reader, prefix); err != nil {
+		clientConn.Close()
+		return
+	}
+	tunnelCtx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	ctx.Req = r.WithContext(tunnelCtx)
+	clientConn = &policyBufferedConn{Conn: clientConn, reader: io.MultiReader(bytes.NewReader(prefix), clientConn), cancel: cancel}
 	defer clientConn.Close()
 	if !p.trackTunnel(clientConn) {
 		return
@@ -274,7 +283,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		Certificates: []tls.Certificate{*cert},
 		// Keep the client-facing side on HTTP/1.1 so request-level control
 		// headers can be inspected and stripped. The target-facing side may
-		// still negotiate HTTP/2 and is bridged by handleHTTP1Tunnel.
+		// still negotiate HTTP/2 and is bridged by serveDefaultTunnel.
 		NextProtos: []string{"http/1.1"},
 		GetCertificate: func(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 			sni := clientHello.ServerName
@@ -286,7 +295,10 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tlsConn := tls.Server(clientConn, tlsConfig)
-	if err := tlsConn.Handshake(); err != nil {
+	handshakeCtx, stopHandshake := context.WithTimeout(tunnelCtx, 30*time.Second)
+	err = tlsConn.HandshakeContext(handshakeCtx)
+	stopHandshake()
+	if err != nil {
 		logTLS("客户端TLS握手失败: %v", err)
 		return
 	}
@@ -324,49 +336,12 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Delay dialing until the first decrypted request when no parent proxy was
-	// supplied on CONNECT, so request-level proxy headers remain available.
-	var targetConn net.Conn
-	if parentProxy == nil {
-		// 延迟建立连接，在 handleHTTP1Tunnel 中从第一个 HTTPS 请求获取代理信息
-		logDebug("CONNECT 阶段未检测到代理信息，延迟建立连接，等待第一个 HTTPS 请求")
-		targetConn = nil
-	} else {
-		// 立即建立连接
-		ctxTimeout, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		targetConn, err = p.dialTLSWithFingerprint(ctxTimeout, "tcp", host, forceProtocol, requestConfig, parentProxy)
-		cancel()
-		if err != nil {
-			logError("连接到目标服务器失败 %s: %v", host, err)
-			return
-		}
-		defer targetConn.Close()
-	}
-
-	// 检查已建立连接的协议
-	targetProtocol := ""
-	if targetConn != nil {
-		if tlsTargetConn, ok := targetConn.(*tls.Conn); ok {
-			targetProtocol = tlsTargetConn.ConnectionState().NegotiatedProtocol
-			logProtocol("目标服务器协商的协议: %s", targetProtocol)
-		} else if utlsConn, ok := targetConn.(*utls.UConn); ok {
-			targetProtocol = utlsConn.ConnectionState().NegotiatedProtocol
-			logProtocol("目标服务器协商的协议: %s", targetProtocol)
-		}
-	}
-
-	// 将连接信息存储到 Context，供 handleHTTP1Tunnel 使用
+	// Select connection identity from CONNECT or the first decrypted request.
 	ctx.Data["host"] = host
 	ctx.Data["forceProtocol"] = forceProtocol
 	ctx.Data["requestConfig"] = requestConfig
-	ctx.Data["targetConn"] = targetConn
 	ctx.Data["parentProxy"] = parentProxy
-
-	// The client side is deliberately HTTP/1.1 so every request can be parsed,
-	// delegated and stripped of X-Mitm-* controls. handleHTTP1Tunnel bridges to
-	// either HTTP/1.1 or HTTP/2 on the target-facing connection.
-	logHTTP1("使用 HTTP/1.x 请求/响应解析和协议交接模式")
-	p.handleHTTP1Tunnel(tlsConn, targetConn, hostname, ctx)
+	p.serveDefaultTunnel(tlsConn, ctx)
 }
 
 func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -374,247 +349,102 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handlePolicyHTTP(w, r, "")
 		return
 	}
-	if r.URL.Host != "" && r.URL.Scheme == "" && r.URL.Path == "" {
-		logTunnel("检测到可能的CONNECT请求（URL格式: %s），重定向到handleConnect", r.URL.Host)
-		if r.Host != "" {
-			p.handleConnect(w, r)
+	ctx := NewContext(r)
+	defer p.delegate.Finish(ctx)
+	if !p.delegate.Auth(ctx, w) {
+		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
+		w.WriteHeader(http.StatusProxyAuthRequired)
+		return
+	}
+	target := *r.URL
+	if target.Scheme == "" {
+		target.Scheme = "http"
+	}
+	if target.Host == "" {
+		target.Host = r.Host
+	}
+	config := parseFingerprintFromHeaders(r.Header)
+	parent, err := parseProxyFromHeaders(r.Header)
+	if err != nil {
+		http.Error(w, "invalid parent proxy", http.StatusBadRequest)
+		return
+	}
+	ctx.Options.HeaderValues = policyHeaders(r.Header)
+	ctx.Options.HeaderValues["Host"] = []string{r.Host}
+	ctx.Options.VerifyTLS = p.verifyTargetCert
+	if target.Scheme == "https" {
+		p.applyImitateConfig(ctx.Options, config)
+		if config.HTTP2SettingsString != "" {
+			ctx.Options.HTTP2SettingsString = config.HTTP2SettingsString
+		}
+	}
+	p.delegate.BeforeRequest(ctx)
+	if ctx.Aborted {
+		return
+	}
+	if ctx.Options == nil {
+		http.Error(w, "invalid request options", 500)
+		return
+	}
+	if parent == nil {
+		parent, err = p.delegate.ParentProxy(r)
+		if err != nil {
+			p.delegate.ErrorLog(err)
+			http.Error(w, "parent proxy selection failed", 502)
 			return
 		}
 	}
-
-	// 创建上下文
-	ctx := NewContext(r)
-
-	targetURL := r.URL.String()
-	if r.URL.Scheme == "" {
-		if r.URL.Host != "" {
-			targetURL = "http://" + r.URL.Host
-			if r.URL.Path != "" {
-				targetURL += r.URL.Path
-			}
-			if r.URL.RawQuery != "" {
-				targetURL += "?" + r.URL.RawQuery
-			}
-		} else if r.Host != "" {
-			targetURL = "http://" + r.Host + r.URL.Path
-			if r.URL.RawQuery != "" {
-				targetURL += "?" + r.URL.RawQuery
-			}
+	if parent != nil {
+		ctx.Options.Proxy = parent.String()
+	}
+	// A forwarding proxy returns redirects unchanged. The caller controls the
+	// next URL, method and credentials; streaming bodies must not be replayed.
+	ctx.Options.DisableRedirect = true
+	ctx.Options.HeaderValues = policyHeaders(http.Header(ctx.Options.HeaderValues))
+	for name := range ctx.Options.HeaderValues {
+		if strings.EqualFold(name, "Content-Length") {
+			delete(ctx.Options.HeaderValues, name)
 		}
 	}
-
-	// 检查目标 URL 的协议
-	targetScheme := ""
-	if parsedURL, err := url.Parse(targetURL); err == nil {
-		targetScheme = parsedURL.Scheme
+	requestCtx, cancel := context.WithCancel(r.Context())
+	if ctx.Options.Timeout > 0 {
+		requestCtx, cancel = context.WithTimeout(r.Context(), time.Duration(ctx.Options.Timeout)*time.Second)
 	}
-
-	// 解析指纹和代理信息
-	requestConfig := parseFingerprintFromHeaders(r.Header)
-	headerProxy, err := parseProxyFromHeaders(r.Header)
-	if err != nil {
-		http.Error(w, "Invalid X-Mitm-Proxy: "+err.Error(), http.StatusBadRequest)
-		p.delegate.Finish(ctx)
-		return
+	defer cancel()
+	if deadline, ok := requestCtx.Deadline(); ok {
+		_ = http.NewResponseController(w).SetReadDeadline(deadline)
 	}
-
-	fingerprintInfo := formatFingerprintInfo(requestConfig)
-	proxyInfo := ""
-	if headerProxy != nil {
-		proxyInfo = proxyURLForLog(headerProxy)
-	}
-
-	logRequest(r.Method, targetURL, fingerprintInfo, proxyInfo)
-
-	// 调用 Delegate.Auth
-	if !p.delegate.Auth(ctx, w) {
-		logResponse(r.Method, targetURL, http.StatusProxyAuthRequired, "Proxy Authentication Required", nil)
-		w.Header().Set("Proxy-Authenticate", "Basic realm=\"Proxy\"")
-		w.WriteHeader(http.StatusProxyAuthRequired)
-		p.delegate.Finish(ctx)
-		return
-	}
-
-	req, err := http.NewRequest(r.Method, targetURL, r.Body)
-	if err != nil {
-		logError("创建请求失败: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		p.delegate.Finish(ctx)
-		return
-	}
-
-	for key, values := range r.Header {
-		if strings.HasPrefix(strings.ToLower(key), "x-mitm-") {
-			continue
-		}
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
-	}
-
-	// 初始化上下文 Options
-	if ctx.Options == nil {
-		ctx.Options = &fastls.Options{
-			Timeout: 30,
-			Headers: make(map[string]string),
-		}
-	}
-
-	for key, values := range r.Header {
-		if strings.HasPrefix(strings.ToLower(key), "x-mitm-") {
-			continue
-		}
-		if len(values) > 0 {
-			ctx.Options.Headers[key] = values[0]
-		}
-	}
-
-	// 仅 HTTPS 请求有 TLS 握手，需要应用指纹配置
-	if targetScheme == "https" {
-		p.applyImitateConfig(ctx.Options, requestConfig)
-
-		// 优先使用请求头中的 HTTP2SettingsString，如果存在则覆盖
-		if requestConfig != nil && requestConfig.HTTP2SettingsString != "" {
-			ctx.Options.HTTP2SettingsString = requestConfig.HTTP2SettingsString
-			logDebug("使用请求头指定的 HTTP2SettingsString: %s", requestConfig.HTTP2SettingsString)
-		}
-
-		// 在转发前将字符串配置展开为 HTTP2Settings 和 PHeaderOrderKeys
-		if ctx.Options.HTTP2SettingsString != "" {
-			h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
-			if err != nil {
-				logError("解析 HTTP2SettingsString 失败: %v", err)
-			} else {
-				// 覆盖 HTTP2Settings
-				ctx.Options.HTTP2Settings = fastls.ToHTTP2Settings(h2Settings)
-				// 如果解析出 PHeaderOrderKeys，则覆盖
-				if len(pHeaderOrderKeys) > 0 {
-					ctx.Options.PHeaderOrderKeys = pHeaderOrderKeys
-				}
-			}
-		}
-	} else {
-		// HTTP 请求：不设置指纹，让 fastls 使用标准库的 http.Client
-		// 只设置基本的 User-Agent（如果有）
-		if requestConfig != nil {
-			// 可以设置 User-Agent，但不设置指纹
-			logDebug("HTTP 请求，跳过指纹配置")
-		}
-	}
-
-	// 在转发前将字符串配置展开为 HTTP2Settings 和 PHeaderOrderKeys
-	if ctx.Options.HTTP2SettingsString != "" {
-		h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
-		if err != nil {
-			logError("解析 HTTP2SettingsString 失败: %v", err)
-		} else {
-			// 覆盖 HTTP2Settings
-			ctx.Options.HTTP2Settings = fastls.ToHTTP2Settings(h2Settings)
-			// 如果解析出 PHeaderOrderKeys，则覆盖
-			if len(pHeaderOrderKeys) > 0 {
-				ctx.Options.PHeaderOrderKeys = pHeaderOrderKeys
-			}
-		}
-	}
-
-	// 调用 Delegate.BeforeRequest
-	p.delegate.BeforeRequest(ctx)
-
-	// 检查是否中止
-	if ctx.Aborted {
-		p.delegate.Finish(ctx)
-		return
-	}
-
-	// 优先使用请求头的代理信息，否则从 Delegate 获取
-	var parentProxy *url.URL
-	if headerProxy != nil {
-		parentProxy = headerProxy
-		logDebug("使用请求头指定的代理: %s", proxyURLForLog(parentProxy))
-	} else {
-		parentProxy, err = p.delegate.ParentProxy(r)
-		if err != nil {
-			p.delegate.ErrorLog(err)
-		}
-	}
-
-	// 设置代理到 Options
-	if parentProxy != nil {
-		ctx.Options.Proxy = parentProxy.String()
-	}
-
-	client := fastls.NewClient()
-	resp, err := client.DoContext(r.Context(), targetURL, *ctx.Options, r.Method)
-	defer resp.Client.CloseIdleConnections()
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
-
-	// 将 fastls.Response 转换为 http.Response
-	var httpResp *http.Response
+	session, err := fastls.NewSession(*ctx.Options)
+	var response fastls.Response
 	if err == nil {
-		httpResp = &http.Response{
-			StatusCode: resp.Status,
-			Header:     http.Header(resp.HeaderValues).Clone(),
-			Body:       resp.Body,
-			Trailer:    resp.Trailer,
+		defer session.Close()
+		request := fastls.RequestOptions{Body: ctx.Options.Body, DisableRedirect: true}
+		if request.Body == "" && r.Body != nil && r.Body != http.NoBody {
+			request.BodyReader = r.Body
 		}
+		response, err = session.DoContext(requestCtx, target.String(), request, r.Method)
 	}
-
-	// 调用 Delegate.BeforeResponse
-	p.delegate.BeforeResponse(ctx, httpResp, err)
-
-	// 检查是否中止
+	var out *http.Response
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	if err == nil {
+		out = &http.Response{StatusCode: response.Status, Header: http.Header(response.HeaderValues).Clone(), Trailer: response.Trailer, Body: response.Body, Request: r.WithContext(requestCtx)}
+	}
+	p.delegate.BeforeResponse(ctx, out, err)
 	if ctx.Aborted {
-		if err == nil {
-			resp.Body.Close()
-		}
-		p.delegate.Finish(ctx)
 		return
 	}
-
 	if err != nil {
-		logResponse(r.Method, targetURL, http.StatusBadGateway, "Bad Gateway", err)
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		p.delegate.Finish(ctx)
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
-	// 使用修改后的响应
-	if httpResp != nil {
-		if len(httpResp.Trailer) > 0 {
-			httpResp.Header.Del("Content-Length")
-			for name := range httpResp.Trailer {
-				httpResp.Header.Add("Trailer", name)
-			}
-		}
-		for key, values := range httpResp.Header {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
-		}
-		w.WriteHeader(httpResp.StatusCode)
-		statusText := http.StatusText(httpResp.StatusCode)
-		logResponse(r.Method, targetURL, httpResp.StatusCode, statusText, nil)
-		if _, copyErr := io.Copy(w, httpResp.Body); copyErr != nil {
-			p.delegate.ErrorLog(copyErr)
-			p.delegate.Finish(ctx)
-			panic(http.ErrAbortHandler)
-		}
-		for name, values := range httpResp.Trailer {
-			w.Header()[name] = append([]string(nil), values...)
-		}
-	} else {
-		for key, value := range resp.Headers {
-			w.Header().Set(key, value)
-		}
-		w.WriteHeader(resp.Status)
-		statusText := http.StatusText(resp.Status)
-		logResponse(r.Method, targetURL, resp.Status, statusText, nil)
-		io.Copy(w, resp.Body)
+	if out == nil || out.Body == nil {
+		http.Error(w, "empty upstream response", 502)
+		return
 	}
-
-	// 调用 Delegate.Finish
-	p.delegate.Finish(ctx)
+	logResponse(r.Method, target.String(), out.StatusCode, http.StatusText(out.StatusCode), nil)
+	writeProxyResponse(w, out)
 }
 
 func (p *MITMProxy) handler() http.Handler {
