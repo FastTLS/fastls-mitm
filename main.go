@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"github.com/FastTLS/fastls-mitm/internal/audit"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 func main() {
 	var (
+		auditConfig       audit.Config
 		listenAddr        string
 		browser           string
 		ja3               string
@@ -82,6 +85,7 @@ func main() {
 		printHelp()
 	}
 
+	auditConfig.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	if showHelp || len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
@@ -108,65 +112,71 @@ func main() {
 
 	setupLogging(debug)
 
-	var fingerprint fastls.Fingerprint = nil
-	browserType := ""
+	if err := audit.Run(auditConfig, func(sink *audit.Sink) error {
+		var fingerprint fastls.Fingerprint = nil
+		browserType := ""
 
-	if ja3 != "" {
-		fingerprint = fastls.Ja3Fingerprint{
-			FingerprintValue: ja3,
-		}
-	} else if ja4r != "" {
-		fingerprint = fastls.Ja4Fingerprint{
-			FingerprintValue: ja4r,
-		}
-	} else {
-		browserType = browser
-	}
-
-	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{
-		AddressPolicyFile:         policyFile,
-		PolicyMaxRequestBytes:     policyMaximum,
-		PolicyMaxInflight:         policyInflight,
-		PolicyMaxTunnels:          policyTunnels,
-		PolicyTunnelMaxAge:        policyTunnelAge,
-		PolicyMaxConnections:      policyConnections,
-		PolicyTunnelMaxReadBytes:  policyTunnelRead,
-		PolicyTunnelMaxWriteBytes: policyTunnelWrite,
-		ListenAddr:                listenAddr,
-		Fingerprint:               fingerprint,
-		Browser:                   browserType,
-		DisableConnect:            disableConnect,
-		VerifyTargetCert:          verifyTargetCert,
-		Delegate:                  &DefaultDelegate{},
-		CertCache:                 NewDefaultCertCache(),
-		CACertPath:                caCertPath,
-		CAKeyPath:                 caKeyPath,
-	})
-	if err != nil {
-		logrus.Fatalf("创建代理服务器失败: %v", err)
-	}
-
-	if debug {
-		logrus.Info("=" + strings.Repeat("=", 60))
-		logrus.Info("中间人代理服务器配置:")
-		logrus.Infof("  监听地址: %s", listenAddr)
-		logrus.Infof("  CA证书: %s", caCertPath)
-		logrus.Infof("  CA私钥: %s", caKeyPath)
-		if verifyTargetCert {
-			logrus.Infof("  目标服务器证书验证: 启用")
+		if ja3 != "" {
+			fingerprint = fastls.Ja3Fingerprint{
+				FingerprintValue: ja3,
+			}
+		} else if ja4r != "" {
+			fingerprint = fastls.Ja4Fingerprint{
+				FingerprintValue: ja4r,
+			}
 		} else {
-			logrus.Infof("  目标服务器证书验证: 禁用（默认）")
+			browserType = browser
 		}
-		logrus.Infof("  日志级别: Debug")
-		logrus.Info("=" + strings.Repeat("=", 60))
-	}
 
-	shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-	if err := proxy.StartContext(shutdownContext); err != nil {
-		logrus.Fatalf("代理服务器启动失败: %v", err)
-	}
-	if shutdownContext.Err() != nil {
-		logrus.Info("代理服务器已安全停止")
+		proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{
+			AddressPolicyFile:         policyFile,
+			Audit:                     sink,
+			PolicyMaxRequestBytes:     policyMaximum,
+			PolicyMaxInflight:         policyInflight,
+			PolicyMaxTunnels:          policyTunnels,
+			PolicyTunnelMaxAge:        policyTunnelAge,
+			PolicyMaxConnections:      policyConnections,
+			PolicyTunnelMaxReadBytes:  policyTunnelRead,
+			PolicyTunnelMaxWriteBytes: policyTunnelWrite,
+			ListenAddr:                listenAddr,
+			Fingerprint:               fingerprint,
+			Browser:                   browserType,
+			DisableConnect:            disableConnect,
+			VerifyTargetCert:          verifyTargetCert,
+			Delegate:                  &DefaultDelegate{},
+			CertCache:                 NewDefaultCertCache(),
+			CACertPath:                caCertPath,
+			CAKeyPath:                 caKeyPath,
+		})
+		if err != nil {
+			return fmt.Errorf("创建代理服务器失败: %w", err)
+		}
+
+		if debug {
+			logrus.Info("=" + strings.Repeat("=", 60))
+			logrus.Info("中间人代理服务器配置:")
+			logrus.Infof("  监听地址: %s", listenAddr)
+			logrus.Infof("  CA证书: %s", caCertPath)
+			logrus.Infof("  CA私钥: %s", caKeyPath)
+			if verifyTargetCert {
+				logrus.Infof("  目标服务器证书验证: 启用")
+			} else {
+				logrus.Infof("  目标服务器证书验证: 禁用（默认）")
+			}
+			logrus.Infof("  日志级别: Debug")
+			logrus.Info("=" + strings.Repeat("=", 60))
+		}
+
+		shutdownContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stopSignals()
+		if err := proxy.StartContext(shutdownContext); err != nil {
+			return fmt.Errorf("代理服务器启动失败: %w", err)
+		}
+		if shutdownContext.Err() != nil {
+			logrus.Info("代理服务器已安全停止")
+		}
+		return nil
+	}); err != nil {
+		logrus.Fatal(err)
 	}
 }

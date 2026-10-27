@@ -12,7 +12,8 @@ import (
 // promised an HTTP 503. Accepted idle and hijacked connections retain a lease.
 type policyLimitedListener struct {
 	net.Listener
-	slots chan struct{}
+	slots    chan struct{}
+	onReject func()
 }
 
 func (l *policyLimitedListener) Accept() (net.Conn, error) {
@@ -23,6 +24,9 @@ func (l *policyLimitedListener) Accept() (net.Conn, error) {
 		}
 		release, ok := acquirePolicySlot(context.Background(), l.slots)
 		if !ok {
+			if l.onReject != nil {
+				l.onReject()
+			}
 			_ = conn.Close()
 			continue
 		}
@@ -49,6 +53,7 @@ var errPolicyTrafficLimit = errors.New("policy tunnel traffic limit reached")
 // The wrapper is installed AFTER CONNECT 200, but OUTSIDE the TLS server and
 // buffered ClientHello reader: handshake and prebuffered bytes are counted too.
 type policyTrafficConn struct {
+	onLimit func()
 	net.Conn
 	readMu         sync.Mutex
 	writeMu        sync.Mutex
@@ -82,6 +87,9 @@ func (c *policyTrafficConn) Read(data []byte) (int, error) {
 	if c.readRemaining > 0 {
 		c.readRemaining -= int64(n)
 		if c.readRemaining == 0 {
+			if c.onLimit != nil {
+				c.onLimit()
+			}
 			_ = c.Close()
 		}
 	}
@@ -105,6 +113,9 @@ func (c *policyTrafficConn) Write(data []byte) (int, error) {
 	if c.writeRemaining > 0 {
 		c.writeRemaining -= int64(n)
 		if c.writeRemaining == 0 {
+			if c.onLimit != nil {
+				c.onLimit()
+			}
 			_ = c.Close()
 		}
 	}

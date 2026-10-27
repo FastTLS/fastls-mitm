@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"github.com/FastTLS/fastls-mitm/internal/audit"
 	"io"
 	"net"
 	"net/http"
@@ -61,7 +62,9 @@ func policyReason(err error) (string, bool) {
 	return "", false
 }
 
-func writePolicyError(w http.ResponseWriter, err error) {
+func writePolicyError(w http.ResponseWriter, ctx context.Context, err error) {
+	code, phase := audit.Error(err, "request_error")
+	audit.Result(ctx, "", 0, code, phase)
 	if reason, ok := policyReason(err); ok {
 		w.Header().Set("X-Proxy-Error", "address_denied")
 		w.Header().Set("X-Proxy-Error-Reason", reason)
@@ -156,7 +159,7 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 		if origin != "" {
 			base, err := url.Parse(origin)
 			if err != nil {
-				writePolicyError(w, proxyPolicyError("invalid_origin"))
+				writePolicyError(w, r.Context(), proxyPolicyError("invalid_origin"))
 				return
 			}
 			ctx.Req.URL.Scheme = base.Scheme
@@ -181,11 +184,13 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 		return
 	}
 	if ctx.Options == nil || ctx.Req == nil || ctx.Req.URL == nil {
-		writePolicyError(w, proxyPolicyError("invalid_request"))
+		writePolicyError(w, r.Context(), proxyPolicyError("invalid_request"))
 		return
 	}
 	if err := p.policyControls(ctx); err != nil {
-		writePolicyError(w, err)
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), "", 0, code, phase)
+		writePolicyError(w, r.Context(), err)
 		return
 	}
 	if ctx.Req.ContentLength > p.policyMaxRequestBytes {
@@ -195,7 +200,9 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 		return
 	}
 	if err := p.policy.CheckAddressPolicy(ctx.Req.Context(), ctx.Req, origin); err != nil {
-		writePolicyError(w, err)
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), "", 0, code, phase)
+		writePolicyError(w, r.Context(), err)
 		return
 	}
 	// Read through EOF before forwarding, so chunked request trailers have
@@ -282,20 +289,31 @@ func (p *MITMProxy) handlePolicyHTTP(w http.ResponseWriter, r *http.Request, ori
 	if err == nil {
 		out = &http.Response{StatusCode: response.Status, Header: http.Header(response.HeaderValues).Clone(), Trailer: response.Trailer, Body: response.Body}
 	}
+	if err != nil {
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), response.Protocol, response.Status, code, phase)
+	} else {
+		audit.Result(r.Context(), response.Protocol, response.Status, "", "")
+	}
+	if out != nil {
+		out.Request = ctx.Req
+	}
 	p.delegate.BeforeResponse(ctx, out, err)
 	if ctx.Aborted {
 		return
 	}
 	if err != nil {
-		writePolicyError(w, err)
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), "", 0, code, phase)
+		writePolicyError(w, r.Context(), err)
 		return
 	}
 	if out == nil || out.Body == nil {
-		writePolicyError(w, errors.New("empty upstream response"))
+		writePolicyError(w, r.Context(), errors.New("empty upstream response"))
 		return
 	}
 	if out.StatusCode == http.StatusSwitchingProtocols {
-		writePolicyError(w, proxyPolicyError("upgrade_unsupported"))
+		writePolicyError(w, r.Context(), proxyPolicyError("upgrade_unsupported"))
 		return
 	}
 	writeProxyResponse(w, out)
@@ -335,24 +353,24 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 	}
 	defer release()
 	if r.Header.Get("X-Mitm-Proxy") != "" {
-		writePolicyError(w, proxyPolicyError("proxy_unsupported"))
+		writePolicyError(w, r.Context(), proxyPolicyError("proxy_unsupported"))
 		return
 	}
 	if r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
-		writePolicyError(w, proxyPolicyError("upgrade_unsupported"))
+		writePolicyError(w, r.Context(), proxyPolicyError("upgrade_unsupported"))
 		return
 	}
 	if r.Header.Get("X-Mitm-Force-HTTP11") == "true" {
-		writePolicyError(w, proxyPolicyError("force_protocol_unsupported"))
+		writePolicyError(w, r.Context(), proxyPolicyError("force_protocol_unsupported"))
 		return
 	}
 	parent, err := p.delegate.ParentProxy(r)
 	if err != nil {
-		writePolicyError(w, errors.New("parent proxy selection failed"))
+		writePolicyError(w, r.Context(), errors.New("parent proxy selection failed"))
 		return
 	}
 	if parent != nil {
-		writePolicyError(w, proxyPolicyError("proxy_unsupported"))
+		writePolicyError(w, r.Context(), proxyPolicyError("proxy_unsupported"))
 		return
 	}
 	host := r.Host
@@ -361,13 +379,15 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 	}
 	u, err := url.Parse("https://" + host)
 	if err != nil || u.Host != host || u.Path != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil || r.ContentLength > 0 || len(r.TransferEncoding) > 0 {
-		writePolicyError(w, proxyPolicyError("invalid_connect_authority"))
+		writePolicyError(w, r.Context(), proxyPolicyError("invalid_connect_authority"))
 		return
 	}
 	origin := u.String()
 	probe := &http.Request{URL: u, Host: host}
 	if err = p.policy.CheckAddressPolicy(r.Context(), probe, origin); err != nil {
-		writePolicyError(w, err)
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), "", 0, code, phase)
+		writePolicyError(w, r.Context(), err)
 		return
 	}
 	cert, err := p.getCertForHost(u.Hostname())
@@ -407,6 +427,7 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 	if _, err = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
+	audit.Downstream(r.Context(), http.StatusOK)
 	tlsConfig := &tls.Config{Certificates: []tls.Certificate{*cert}, NextProtos: []string{"http/1.1"}, MinVersion: tls.VersionTLS12}
 	tlsConfig.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		if hello.ServerName == "" {
@@ -422,7 +443,9 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 	}
 	var tlsWire net.Conn = conn
 	if p.policyLimits.tunnelMaxReadBytes > 0 || p.policyLimits.tunnelMaxWriteBytes > 0 {
-		tlsWire = newPolicyTrafficConn(conn, p.policyLimits.tunnelMaxReadBytes, p.policyLimits.tunnelMaxWriteBytes)
+		traffic := newPolicyTrafficConn(conn, p.policyLimits.tunnelMaxReadBytes, p.policyLimits.tunnelMaxWriteBytes)
+		traffic.onLimit = func() { audit.Result(tunnelCtx, "", 0, "traffic_limited", "") }
+		tlsWire = traffic
 	}
 	tlsConn := tls.Server(tlsWire, tlsConfig)
 	handshakeCtx, stop := context.WithTimeout(tunnelCtx, 30*time.Second)
@@ -440,7 +463,7 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 				listener.Close()
 			}
 		},
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		Handler: p.audit.HTTP("mitm", http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 			if !parseFingerprintFromHeaders(request.Header).Override {
 				for _, name := range []string{"X-Mitm-Browser", "X-Mitm-Ja3", "X-Mitm-Ja4r", "X-Mitm-H2Settings"} {
 					if value := r.Header.Get(name); value != "" {
@@ -449,7 +472,7 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 			p.handlePolicyHTTP(w, request, origin)
-		}),
+		})),
 	}
 	defer server.Close()
 	_ = server.Serve(listener)

@@ -3,6 +3,8 @@ package main
 import "fmt"
 
 func printHelp() {
+	fmt.Println("Audit (development): -audit-file PATH -audit-queue 1024 -audit-drain-timeout 5s; disabled without a file")
+
 	fmt.Printf("Fastls MITM Proxy - 中间人代理服务器\n\n")
 	fmt.Printf("用法:\n")
 	fmt.Printf("  fastls-mitm [选项]\n\n")

@@ -50,7 +50,7 @@ func enabledPolicyProxyWithLimits(t *testing.T, config any, maximum int64, limit
 	if err = os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{AddressPolicyFile: path, PolicyMaxRequestBytes: maximum, PolicyMaxInflight: limits.PolicyMaxInflight, PolicyMaxTunnels: limits.PolicyMaxTunnels, PolicyTunnelMaxAge: limits.PolicyTunnelMaxAge, PolicyMaxConnections: limits.PolicyMaxConnections, PolicyTunnelMaxReadBytes: limits.PolicyTunnelMaxReadBytes, PolicyTunnelMaxWriteBytes: limits.PolicyTunnelMaxWriteBytes, Browser: "firefox", CACertPath: filepath.Join(directory, "ca.pem"), CAKeyPath: filepath.Join(directory, "key.pem")})
+	proxy, err := NewMITMProxyWithOptions(NewMITMProxyOptions{Audit: limits.Audit, AddressPolicyFile: path, PolicyMaxRequestBytes: maximum, PolicyMaxInflight: limits.PolicyMaxInflight, PolicyMaxTunnels: limits.PolicyMaxTunnels, PolicyTunnelMaxAge: limits.PolicyTunnelMaxAge, PolicyMaxConnections: limits.PolicyMaxConnections, PolicyTunnelMaxReadBytes: limits.PolicyTunnelMaxReadBytes, PolicyTunnelMaxWriteBytes: limits.PolicyTunnelMaxWriteBytes, Browser: "firefox", CACertPath: filepath.Join(directory, "ca.pem"), CAKeyPath: filepath.Join(directory, "key.pem")})
 	if err != nil {
 		t.Fatal(err)
 	}

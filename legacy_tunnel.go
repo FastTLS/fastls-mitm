@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"github.com/FastTLS/fastls-mitm/internal/audit"
 	"io"
 	"net"
 	"net/http"
@@ -40,7 +41,7 @@ func (p *MITMProxy) serveDefaultTunnel(clientConn net.Conn, outer *Context) {
 				listener.Close()
 			}
 		},
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		Handler: p.audit.HTTP("mitm", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			timeout := 30 * time.Second
 			if outer.Options != nil && outer.Options.Timeout > 0 {
 				timeout = time.Duration(outer.Options.Timeout) * time.Second
@@ -111,14 +112,17 @@ func (p *MITMProxy) serveDefaultTunnel(clientConn net.Conn, outer *Context) {
 			}
 			response, err := transport.RoundTrip(prepared)
 			if err != nil {
+				code, phase := audit.Error(err, "request_error")
+				audit.Result(ctx, "", 0, code, phase)
 				logError("upstream request failed: %v", err)
 				w.Header().Set("Connection", "close")
 				http.Error(w, "upstream request failed", http.StatusBadGateway)
 				return
 			}
+			audit.Result(ctx, response.Proto, response.StatusCode, "", "")
 			defer response.Body.Close()
 			writeProxyResponse(w, response)
-		}),
+		})),
 	}
 	defer server.Close()
 	_ = server.Serve(listener)
@@ -193,6 +197,10 @@ func writeProxyResponse(w http.ResponseWriter, response *http.Response) {
 	// Streaming headers must reach the peer before waiting for more body data.
 	_ = http.NewResponseController(w).Flush()
 	if _, err := io.Copy(w, response.Body); err != nil {
+		if response.Request != nil {
+			code, phase := audit.Error(err, "read_error")
+			audit.Result(response.Request.Context(), "", 0, code, phase)
+		}
 		panic(http.ErrAbortHandler)
 	}
 	for name, values := range response.Trailer {

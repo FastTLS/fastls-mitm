@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/FastTLS/fastls-mitm/internal/audit"
 	"io"
 	"net"
 	"net/http"
@@ -51,6 +52,7 @@ func (c *DefaultCertCache) Get(host string) *tls.Certificate {
 }
 
 type MITMProxy struct {
+	audit                 *audit.Sink
 	policy                mitmAddressPolicy
 	policyMaxRequestBytes int64
 	policyLimits          policyLimits
@@ -65,6 +67,7 @@ type MITMProxy struct {
 	tunnelMu              sync.Mutex
 	tunnels               map[net.Conn]struct{}
 	tunnelClosing         bool
+	tunnelDone            chan struct{}
 	certCache             CertCache
 	fingerprint           fastls.Fingerprint
 	browser               string
@@ -77,6 +80,7 @@ type MITMProxy struct {
 
 // NewMITMProxyOptions MITMProxy 配置选项
 type NewMITMProxyOptions struct {
+	Audit *audit.Sink
 	// AddressPolicyFile is trusted startup configuration, never a request header.
 	AddressPolicyFile string
 	// PolicyMaxRequestBytes is 0 for the policy-mode default of 4 MiB.
@@ -134,6 +138,7 @@ func NewMITMProxyWithOptions(opts NewMITMProxyOptions) (*MITMProxy, error) {
 	}
 
 	proxy := &MITMProxy{
+		audit:                 opts.Audit,
 		policy:                policy,
 		policyMaxRequestBytes: maximum,
 		policyLimits:          limits,
@@ -265,6 +270,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	audit.Downstream(r.Context(), http.StatusOK)
 	logResponse("CONNECT", host, http.StatusOK, "Connection Established", nil)
 	logDebug("已发送CONNECT响应: %d 字节", n)
 
@@ -299,6 +305,7 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	err = tlsConn.HandshakeContext(handshakeCtx)
 	stopHandshake()
 	if err != nil {
+		audit.Result(ctx.Req.Context(), "", 0, "transport_error", "")
 		logTLS("客户端TLS握手失败: %v", err)
 		return
 	}
@@ -431,6 +438,12 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		out = &http.Response{StatusCode: response.Status, Header: http.Header(response.HeaderValues).Clone(), Trailer: response.Trailer, Body: response.Body, Request: r.WithContext(requestCtx)}
 	}
+	if err != nil {
+		code, phase := audit.Error(err, "request_error")
+		audit.Result(r.Context(), response.Protocol, response.Status, code, phase)
+	} else {
+		audit.Result(r.Context(), response.Protocol, response.Status, "", "")
+	}
 	p.delegate.BeforeResponse(ctx, out, err)
 	if ctx.Aborted {
 		return
@@ -448,7 +461,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *MITMProxy) handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return p.audit.HTTP("mitm", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if p.policy == nil {
 			logDebug("收到请求: %s %s (Method: %s, Host: %s, URL: %s)", r.Method, r.URL.Path, r.Method, r.Host, r.URL.String())
 		}
@@ -480,7 +493,7 @@ func (p *MITMProxy) handler() http.Handler {
 		}
 
 		p.handleHTTP(w, r)
-	})
+	}))
 }
 
 func (p *MITMProxy) Start() error {
@@ -538,6 +551,7 @@ func (p *MITMProxy) prepareServer(listener net.Listener) (*http.Server, error) {
 	}
 	p.tunnelMu.Lock()
 	p.tunnelClosing = false
+	p.tunnelDone = nil
 	p.tunnelMu.Unlock()
 	p.server = server
 	p.serverMu.Unlock()
@@ -546,7 +560,7 @@ func (p *MITMProxy) prepareServer(listener net.Listener) (*http.Server, error) {
 
 func (p *MITMProxy) servePrepared(server *http.Server, listener net.Listener) error {
 	if p.policy != nil && p.policyLimits.connections != nil {
-		listener = &policyLimitedListener{Listener: listener, slots: p.policyLimits.connections}
+		listener = &policyLimitedListener{Listener: listener, slots: p.policyLimits.connections, onReject: func() { p.audit.Reject("mitm") }}
 	}
 	err := server.Serve(listener)
 	p.serverMu.Lock()
@@ -567,15 +581,18 @@ func (p *MITMProxy) Shutdown(ctx context.Context) error {
 	p.serverMu.Lock()
 	server := p.server
 	p.serverMu.Unlock()
-	p.closeTunnels()
-	if server == nil {
-		return nil
+	done := p.closeTunnels()
+	var err error
+	if server != nil {
+		err = server.Shutdown(ctx)
+		if err != nil {
+			_ = server.Close()
+		}
 	}
-	err := server.Shutdown(ctx)
-	if err != nil && p.policy != nil {
-		// The graceful window ended. Close pre-header and ordinary active
-		// connections as well; their leases must not outlive policy shutdown.
-		_ = server.Close()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		err = errors.Join(err, ctx.Err())
 	}
 	return err
 }
@@ -603,12 +620,18 @@ func (p *MITMProxy) trackTunnel(connection net.Conn) bool {
 func (p *MITMProxy) untrackTunnel(connection net.Conn) {
 	p.tunnelMu.Lock()
 	delete(p.tunnels, connection)
+	p.signalTunnelsDrained()
 	p.tunnelMu.Unlock()
 }
 
-func (p *MITMProxy) closeTunnels() {
+func (p *MITMProxy) closeTunnels() <-chan struct{} {
 	p.tunnelMu.Lock()
 	p.tunnelClosing = true
+	if p.tunnelDone == nil {
+		p.tunnelDone = make(chan struct{})
+	}
+	done := p.tunnelDone
+	p.signalTunnelsDrained()
 	connections := make([]net.Conn, 0, len(p.tunnels))
 	for connection := range p.tunnels {
 		connections = append(connections, connection)
@@ -616,5 +639,18 @@ func (p *MITMProxy) closeTunnels() {
 	p.tunnelMu.Unlock()
 	for _, connection := range connections {
 		_ = connection.Close()
+	}
+	return done
+}
+
+// Called with tunnelMu held. Closing this channel waits for request audit
+// completions as well as socket closure, including hijacked CONNECT handlers.
+func (p *MITMProxy) signalTunnelsDrained() {
+	if p.tunnelClosing && len(p.tunnels) == 0 && p.tunnelDone != nil {
+		select {
+		case <-p.tunnelDone:
+		default:
+			close(p.tunnelDone)
+		}
 	}
 }
