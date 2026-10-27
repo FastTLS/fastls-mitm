@@ -26,8 +26,7 @@ def test_mitm_proxy():
     
     try:
         # 通过代理发送请求
-        # 注意：对于MITM代理，需要禁用SSL验证或使用正确的CA证书
-        # 使用 Session 来确保代理配置正确
+        # 此示例关闭证书校验；启用校验时需信任代理 CA
         session = requests.Session()
         session.proxies = {
             "http": proxy_url,
@@ -79,7 +78,6 @@ def test_with_custom_fingerprint():
     # 注意：MITM代理的指纹设置在启动时配置
     # 这里只是演示如何通过代理发送请求
     try:
-        # 使用 Session 来确保代理配置正确
         session = requests.Session()
         session.proxies = {
             "http": proxy_url,

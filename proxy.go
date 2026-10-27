@@ -436,8 +436,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 只有 HTTPS 请求才应用指纹配置
-	// HTTP 请求不需要 TLS 指纹
+	// 仅 HTTPS 请求有 TLS 握手，需要应用指纹配置
 	if targetScheme == "https" {
 		p.applyImitateConfig(ctx.Options, requestConfig)
 
@@ -447,8 +446,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			logDebug("使用请求头指定的 HTTP2SettingsString: %s", requestConfig.HTTP2SettingsString)
 		}
 
-		// 如果 HTTP2SettingsString 不为空，则解析并覆盖 HTTP2Settings 和 PHeaderOrderKeys
-		// 注意：虽然 fastls.NewClient().Do() 会调用 processRequest 来解析，但这里显式解析可以确保一致性
+		// 在转发前将字符串配置展开为 HTTP2Settings 和 PHeaderOrderKeys
 		if ctx.Options.HTTP2SettingsString != "" {
 			h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
 			if err != nil {
@@ -471,8 +469,7 @@ func (p *MITMProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 如果 HTTP2SettingsString 不为空，则解析并覆盖 HTTP2Settings 和 PHeaderOrderKeys
-	// 注意：虽然 fastls.NewClient().Do() 会调用 processRequest 来解析，但这里显式解析可以确保一致性
+	// 在转发前将字符串配置展开为 HTTP2Settings 和 PHeaderOrderKeys
 	if ctx.Options.HTTP2SettingsString != "" {
 		h2Settings, pHeaderOrderKeys, err := fastls.ParseH2SettingsStringWithPHeaderOrder(ctx.Options.HTTP2SettingsString)
 		if err != nil {

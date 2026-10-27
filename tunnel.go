@@ -114,7 +114,6 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 }
 
 func (p *MITMProxy) handleHTTP1Tunnel(clientConn net.Conn, targetConn net.Conn, hostname string, ctx *Context) {
-	// 确保在函数退出时关闭服务端连接
 	defer func() {
 		// 关闭服务端连接（可能是传入的，也可能是从 Context 获取的）
 		if targetConn != nil {
@@ -564,7 +563,6 @@ func (p *MITMProxy) writeRequestWithHeaderOrder(req *http.Request, w io.Writer, 
 				remainingKeys = append(remainingKeys, k)
 			}
 		}
-		// 简单排序
 		for i := 0; i < len(remainingKeys); i++ {
 			for j := i + 1; j < len(remainingKeys); j++ {
 				if remainingKeys[i] > remainingKeys[j] {
@@ -586,7 +584,6 @@ func (p *MITMProxy) writeRequestWithHeaderOrder(req *http.Request, w io.Writer, 
 		for k := range headerMap {
 			keys = append(keys, k)
 		}
-		// 简单排序
 		for i := 0; i < len(keys); i++ {
 			for j := i + 1; j < len(keys); j++ {
 				if keys[i] > keys[j] {
