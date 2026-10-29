@@ -385,6 +385,17 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 	origin := u.String()
 	probe := &http.Request{URL: u, Host: host}
 	if err = p.policy.CheckAddressPolicy(r.Context(), probe, origin); err != nil {
+		// CONNECT carries an authority, not an application scheme. Admit an
+		// HTTP-only policy only on a scheme rejection, then bind and recheck
+		// the actual protocol before any origin connection is created.
+		var reason interface{ AddressPolicyReason() string }
+		if errors.As(err, &reason) && reason.AddressPolicyReason() == "scheme_not_allowed" {
+			u.Scheme = "http"
+			origin = u.String()
+			err = p.policy.CheckAddressPolicy(r.Context(), probe, origin)
+		}
+	}
+	if err != nil {
 		code, phase := audit.Error(err, "request_error")
 		audit.Result(r.Context(), "", 0, code, phase)
 		writePolicyError(w, r.Context(), err)
@@ -447,14 +458,30 @@ func (p *MITMProxy) handlePolicyConnect(w http.ResponseWriter, r *http.Request) 
 		traffic.onLimit = func() { audit.Result(tunnelCtx, "", 0, "traffic_limited", "") }
 		tlsWire = traffic
 	}
-	tlsConn := tls.Server(tlsWire, tlsConfig)
-	handshakeCtx, stop := context.WithTimeout(tunnelCtx, 30*time.Second)
-	err = tlsConn.HandshakeContext(handshakeCtx)
-	stop()
+	applicationConn, encrypted, err := readTunnelProtocol(tunnelCtx, tlsWire)
 	if err != nil {
 		return
 	}
-	listener := &policySingleListener{conn: tlsConn, done: make(chan struct{})}
+	u.Scheme = "http"
+	if encrypted {
+		u.Scheme = "https"
+	}
+	origin = u.String()
+	if err = p.policy.CheckAddressPolicy(tunnelCtx, probe, origin); err != nil {
+		audit.Result(tunnelCtx, "", 0, "address_denied", "")
+		return
+	}
+	if encrypted {
+		tlsConn := tls.Server(applicationConn, tlsConfig)
+		handshakeCtx, stop := context.WithTimeout(tunnelCtx, 30*time.Second)
+		err = tlsConn.HandshakeContext(handshakeCtx)
+		stop()
+		if err != nil {
+			return
+		}
+		applicationConn = tlsConn
+	}
+	listener := &policySingleListener{conn: applicationConn, done: make(chan struct{})}
 	server := &http.Server{
 		MaxHeaderBytes: 64 << 10, ReadHeaderTimeout: 30 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return tunnelCtx },

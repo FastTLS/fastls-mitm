@@ -3,7 +3,7 @@ module github.com/FastTLS/fastls-mitm
 go 1.26.0
 
 require (
-	github.com/FastTLS/fastls v0.1.2
+	github.com/FastTLS/fastls v0.1.3-0.20261029044750-32699153caa1
 	github.com/FastTLS/ftransport v0.1.1
 	github.com/FastTLS/imitate v0.1.1
 	github.com/refraction-networking/utls v1.8.2

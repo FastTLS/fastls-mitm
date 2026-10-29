@@ -16,7 +16,6 @@ import (
 	fastls "github.com/FastTLS/fastls"
 	"github.com/FastTLS/ftransport"
 	utls "github.com/refraction-networking/utls"
-	"github.com/sirupsen/logrus"
 	xproxy "golang.org/x/net/proxy"
 )
 
@@ -24,6 +23,32 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
+	}
+
+	options := fastls.Options{Headers: make(map[string]string)}
+	fingerprint, userAgent := p.applyImitateConfig(&options, requestConfig)
+	var spec *utls.ClientHelloSpec
+	if options.Profile != nil {
+		spec, err = fastls.ProfileToSpec(*options.Profile)
+	} else if fingerprint != nil && !fingerprint.IsEmpty() {
+		spec, err = fastls.StringToSpec(fingerprint.Value(), userAgent)
+	} else {
+		return nil, fmt.Errorf("TLS profile is unavailable")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("invalid TLS profile: %w", err)
+	}
+	if forceProtocol == "http/1.1" {
+		found := false
+		for i, extension := range spec.Extensions {
+			if _, ok := extension.(*utls.ALPNExtension); ok {
+				spec.Extensions[i] = &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}}
+				found = true
+			}
+		}
+		if !found {
+			spec.Extensions = append(spec.Extensions, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+		}
 	}
 
 	var rawConn net.Conn
@@ -41,68 +66,17 @@ func (p *MITMProxy) dialTLSWithFingerprint(ctx context.Context, network, addr st
 		}
 	}
 
-	options := fastls.Options{
-		Headers: make(map[string]string),
+	conn := utls.UClient(rawConn, &utls.Config{
+		ServerName:             host,
+		OmitEmptyPsk:           true,
+		InsecureSkipVerify:     !p.verifyTargetCert,
+		SessionTicketsDisabled: options.Profile != nil && options.Profile.TLS.SessionPolicy == "disabled",
+	}, utls.HelloCustom)
+
+	if err := conn.ApplyPreset(spec); err != nil {
+		rawConn.Close()
+		return nil, fmt.Errorf("应用TLS预设失败: %v", err)
 	}
-	fingerprint, userAgent := p.applyImitateConfig(&options, requestConfig)
-
-	if fingerprint == nil || fingerprint.IsEmpty() {
-		browserType := p.browser
-		if browserType == "" {
-			browserType = "firefox"
-		}
-		logrus.Warnf("警告: 浏览器指纹 (%s) 未设置成功，将使用标准TLS", browserType)
-	}
-
-	if fingerprint != nil && !fingerprint.IsEmpty() {
-		spec, err := fastls.StringToSpec(fingerprint.Value(), userAgent)
-		if err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("创建TLS规范失败: %v", err)
-		}
-
-		conn := utls.UClient(rawConn, &utls.Config{
-			ServerName:         host,
-			OmitEmptyPsk:       true,
-			InsecureSkipVerify: !p.verifyTargetCert,
-		}, utls.HelloCustom)
-
-		if forceProtocol == "http/1.1" {
-			for i, ext := range spec.Extensions {
-				if _, ok := ext.(*utls.ALPNExtension); ok {
-					spec.Extensions[i] = &utls.ALPNExtension{
-						AlpnProtocols: []string{"http/1.1"},
-					}
-					logProtocol("已强制设置 ALPN 为 http/1.1")
-					break
-				}
-			}
-		}
-
-		if err := conn.ApplyPreset(spec); err != nil {
-			rawConn.Close()
-			return nil, fmt.Errorf("应用TLS预设失败: %v", err)
-		}
-
-		if err := conn.HandshakeContext(ctx); err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("TLS握手失败: %w", err)
-		}
-
-		return conn, nil
-	}
-
-	tlsConfig := &tls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: !p.verifyTargetCert,
-	}
-	if forceProtocol == "http/1.1" {
-		tlsConfig.NextProtos = []string{"http/1.1"}
-	} else {
-		// 默认优先使用 HTTP/2
-		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
-	}
-	conn := tls.Client(rawConn, tlsConfig)
 
 	if err := conn.HandshakeContext(ctx); err != nil {
 		conn.Close()

@@ -35,8 +35,8 @@ func enabledPolicyProxy(t *testing.T, config any, maximum int64, delegates ...De
 
 func enabledPolicyProxyWithLimits(t *testing.T, config any, maximum int64, limits NewMITMProxyOptions, delegates ...Delegate) (*MITMProxy, *url.URL) {
 	t.Helper()
-	if workspace := os.Getenv("GOWORK"); !filepath.IsAbs(workspace) {
-		t.Fatal("mitm_policy_e2e requires explicit absolute GOWORK")
+	if workspace := os.Getenv("GOWORK"); workspace != "off" && !filepath.IsAbs(workspace) {
+		t.Fatal("mitm_policy_e2e requires explicit GOWORK=off or an absolute workspace")
 	}
 	if _, ok := any(fastls.NewClient()).(mitmAddressPolicy); !ok {
 		t.Fatal("core preflight/origin capability is required; do not skip enabled tests")
@@ -342,7 +342,11 @@ func TestMITMPolicyCIDRDenyStopsCONNECTBefore200(t *testing.T) {
 }
 
 func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
-	for _, workspace := range []string{"off", os.Getenv("GOWORK")} {
+	workspaces := []string{"off"}
+	if workspace := os.Getenv("GOWORK"); workspace != "off" {
+		workspaces = append(workspaces, workspace)
+	}
+	for _, workspace := range workspaces {
 		t.Run(workspace, func(t *testing.T) {
 			name := "policy-mitm"
 			if runtime.GOOS == "windows" {
@@ -356,10 +360,9 @@ func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
 			}
 			directory := t.TempDir()
 			path := filepath.Join(directory, "policy.json")
-			data := []byte(`{}`)
-			if workspace != "off" {
-				data = []byte(`{"allow_hosts":null}`)
-			}
+			// Both pinned and workspace cores now provide policy support. Check
+			// malformed trusted input in each mode before any CA side effect.
+			data := []byte(`{"allow_hosts":null}`)
 			os.WriteFile(path, data, 0600)
 			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 			defer cancel()
@@ -369,7 +372,7 @@ func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
 			if ctx.Err() != nil || err == nil {
 				t.Fatalf("unsafe startup %v %s", err, output)
 			}
-			if workspace == "off" && !bytes.Contains(output, []byte("refusing to start")) {
+			if !bytes.Contains(output, []byte("invalid address policy JSON")) {
 				t.Fatal(string(output))
 			}
 			if _, err := os.Stat(filepath.Join(directory, "mitm-ca-key.pem")); !os.IsNotExist(err) {
@@ -388,7 +391,7 @@ func TestMITMPolicyBinaryCapabilityAndCAIsolation(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(directory, "mitm-ca-key.pem")); !os.IsNotExist(err) {
 				t.Fatal("invalid resource flags created CA key")
 			}
-			if workspace != "off" {
+			{
 				if err := os.WriteFile(path, []byte(`{}`), 0600); err != nil {
 					t.Fatal(err)
 				}

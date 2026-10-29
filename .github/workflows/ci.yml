@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      validation:
+        description: Development feedback or frozen candidate validation
+        type: choice
+        options: [quick, candidate]
+        default: candidate
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -17,7 +23,29 @@ env:
   GOWORK: 'off'
 
 jobs:
+  plan:
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+    outputs:
+      plan: ${{ steps.plan.outputs.plan }}
+      mode: ${{ steps.plan.outputs.mode }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      quality: ${{ steps.plan.outputs.quality }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate selector and rejection gates
+        run: python -m unittest discover -s scripts -p test_ci_plan.py -v
+      - id: plan
+        run: python scripts/ci_plan.py
+      - name: Check patch whitespace
+        run: git diff --check HEAD^ HEAD
+
   dependency-policy:
+    needs: plan
+    if: needs.plan.outputs.mode != 'docs'
     name: Dependency policy
     runs-on: ubuntu-24.04
     steps:
@@ -46,14 +74,14 @@ jobs:
           fi
 
   test:
+    timeout-minutes: 20
+    if: needs.plan.outputs.mode != 'docs'
     name: ${{ matrix.os }} / Go ${{ matrix.go }}
-    needs: dependency-policy
+    needs: [plan, dependency-policy]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, windows-2022, macos-15]
-        go: ['1.26.10', '1.27.3']
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -63,15 +91,17 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
       - name: Test
-        run: go test ./...
+        run: go test -tags mitm_policy_e2e ./...
       - name: Vet
         run: go vet ./...
       - name: Build all packages
         run: go build ./...
 
   quality:
+    timeout-minutes: 20
+    if: needs.plan.outputs.quality == 'true'
     name: Race, coverage and CLI smoke test
-    needs: dependency-policy
+    needs: [plan, dependency-policy]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -81,15 +111,14 @@ jobs:
         with:
           go-version: '1.26.10'
           cache: true
-      - name: Race test
-        run: go test -race ./...
+      - name: Race and coverage in one execution
+        run: go test -race -tags mitm_policy_e2e -covermode=atomic -coverprofile=coverage.out ./...
       - name: Policy hop and control-header fuzz
         run: go test -run '^$' -fuzz '^FuzzMITMPolicyHeaders$' -fuzztime 20s .
       - name: Cumulative tunnel traffic budget fuzz
         run: go test -run '^$' -fuzz '^FuzzPolicyTrafficBudget$' -fuzztime 20s .
       - name: Coverage
         run: |
-          go test -covermode=atomic -coverprofile=coverage.out ./...
           go tool cover -func=coverage.out
       - name: CLI smoke test
         run: |
@@ -102,3 +131,18 @@ jobs:
           path: coverage.out
           retention-days: 14
           if-no-files-found: error
+
+  accepted:
+    name: Accepted validation plan
+    if: always()
+    needs: [plan, dependency-policy, test, quality]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Reject failures, cancellations, missing or unexpected skipped jobs
+        env:
+          VALIDATION_PLAN: ${{ needs.plan.outputs.plan }}
+          VALIDATION_JOBS: ${{ toJSON(needs) }}
+        run: python scripts/ci_plan.py --gate

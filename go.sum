@@ -1,5 +1,5 @@
-github.com/FastTLS/fastls v0.1.2 h1:mkqA9Ienyrz+lOsF5lpEtPqSHjGjJjzDYmyofJXFUD4=
-github.com/FastTLS/fastls v0.1.2/go.mod h1:Qg5KUCiqIPx/QVLhXoyimUFzdr5aflvgtBr3TdndQ/k=
+github.com/FastTLS/fastls v0.1.3-0.20261029044750-32699153caa1 h1:IsUtdcr0NQSo6T23L+AcgIrC3Klv9eiYEGa7+lzAEek=
+github.com/FastTLS/fastls v0.1.3-0.20261029044750-32699153caa1/go.mod h1:Qg5KUCiqIPx/QVLhXoyimUFzdr5aflvgtBr3TdndQ/k=
 github.com/FastTLS/fastls/profile v0.1.0 h1:xs6Us8L6+81bGDBk+5wvMKg6Y6yd4oeEy0OhNL51jFg=
 github.com/FastTLS/fastls/profile v0.1.0/go.mod h1:dXt6QcpzDhLvBAqbNIpQ2g/vqgUXQRRuaxotdZB6EbU=
 github.com/FastTLS/ftransport v0.1.1 h1:ILQJgkR+/mz5xPjdhcpH+HF/tOWN+HGlvM/wCrNZq0I=

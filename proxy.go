@@ -278,6 +278,15 @@ func (p *MITMProxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		hostname = host
 	}
+	var tlsTunnel bool
+	clientConn, tlsTunnel, err = readTunnelProtocol(tunnelCtx, clientConn)
+	if err != nil {
+		return
+	}
+	if !tlsTunnel {
+		p.serveCleartextCONNECT(clientConn, ctx, host, requestConfig, headerProxy)
+		return
+	}
 
 	cert, err := p.getCertForHost(hostname)
 	if err != nil {

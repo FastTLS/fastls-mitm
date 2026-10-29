@@ -67,42 +67,72 @@ func (p *MITMProxy) serveDefaultTunnel(clientConn net.Conn, outer *Context) {
 				parent, _ = outer.Data["parentProxy"].(*url.URL)
 			}
 			host := outer.Data["host"].(string)
+			scheme, _ := outer.Data["scheme"].(string)
+			if scheme == "" {
+				scheme = "https"
+			}
+			if scheme == "http" && !boundCleartextRequest(req, host) {
+				w.Header().Set("Connection", "close")
+				http.Error(w, "CONNECT authority mismatch or unsupported request", http.StatusForbidden)
+				return
+			}
 			modified, order, pseudo, settings := p.modifyRequestHeaders(req, host, config)
-			modified.URL.Scheme, modified.URL.Host = "https", host
+			modified.URL.Scheme, modified.URL.Host = scheme, host
 			modified.RequestURI = ""
 			modified.Header = policyHeaders(modified.Header)
 			modified.Header.Del("Host") // authority belongs to Request.Host
 			if transport == nil {
-				force, _ := outer.Data["forceProtocol"].(string)
-				conn, err := p.dialTLSWithFingerprint(ctx, "tcp", host, force, config, parent)
-				if err != nil {
-					http.Error(w, "upstream connection failed", http.StatusBadGateway)
-					return
-				}
-				protocol := "http/1.1"
-				switch c := conn.(type) {
-				case *tls.Conn:
-					if c.ConnectionState().NegotiatedProtocol == "h2" {
-						protocol = "h2"
+				if scheme == "http" {
+					transport, err = ftransport.NewTransport(ftransport.Config{
+						Protocols: []ftransport.Protocol{ftransport.ProtocolHTTP1},
+						HTTP1:     ftransport.HTTP1Config{HeaderOrder: order},
+						DialContext: func(ctx context.Context, request ftransport.DialRequest) (ftransport.DialResult, error) {
+							var conn net.Conn
+							var err error
+							if parent != nil {
+								conn, err = p.dialThroughProxy(ctx, "tcp", host, parent)
+							} else {
+								conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", host)
+							}
+							return ftransport.DialResult{Conn: conn}, err
+						},
+					})
+					if err != nil {
+						http.Error(w, "upstream transport failed", http.StatusBadGateway)
+						return
 					}
-				case *utls.UConn:
-					if c.ConnectionState().NegotiatedProtocol == "h2" {
-						protocol = "h2"
+				} else {
+					force, _ := outer.Data["forceProtocol"].(string)
+					conn, err := p.dialTLSWithFingerprint(ctx, "tcp", host, force, config, parent)
+					if err != nil {
+						http.Error(w, "upstream connection failed", http.StatusBadGateway)
+						return
 					}
-				}
-				upstream = &tunnelOwnedConn{Conn: conn}
-				transport, err = newTunnelTransport(upstream, protocol, settings, func(ctx context.Context) (net.Conn, error) {
-					selectedForce := force
-					if protocol == "http/1.1" {
-						selectedForce = "http/1.1"
+					protocol := "http/1.1"
+					switch c := conn.(type) {
+					case *tls.Conn:
+						if c.ConnectionState().NegotiatedProtocol == "h2" {
+							protocol = "h2"
+						}
+					case *utls.UConn:
+						if c.ConnectionState().NegotiatedProtocol == "h2" {
+							protocol = "h2"
+						}
 					}
-					return p.dialTLSWithFingerprint(ctx, "tcp", host, selectedForce, config, parent)
-				})
-				upstreamH2 = protocol == "h2"
-				if err != nil {
-					upstream.Close()
-					http.Error(w, "upstream transport failed", http.StatusBadGateway)
-					return
+					upstream = &tunnelOwnedConn{Conn: conn}
+					transport, err = newTunnelTransport(upstream, protocol, settings, func(ctx context.Context) (net.Conn, error) {
+						selectedForce := force
+						if protocol == "http/1.1" {
+							selectedForce = "http/1.1"
+						}
+						return p.dialTLSWithFingerprint(ctx, "tcp", host, selectedForce, config, parent)
+					})
+					upstreamH2 = protocol == "h2"
+					if err != nil {
+						upstream.Close()
+						http.Error(w, "upstream transport failed", http.StatusBadGateway)
+						return
+					}
 				}
 			}
 			if !upstreamH2 {
