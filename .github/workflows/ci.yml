@@ -18,6 +18,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   GOWORK: 'off'
@@ -39,15 +40,19 @@ jobs:
       - name: Validate selector and rejection gates
         run: python -m unittest discover -s scripts -p test_ci_plan.py -v
       - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python scripts/ci_plan.py
       - name: Validate release evidence rejection gates
         run: python -m unittest discover -s scripts -p test_release_gate.py -v
+      - name: Test immutable input and recovery boundaries
+        run: python -m unittest discover -s scripts -p "test_*inputs.py" -v
       - name: Check patch whitespace
         run: git diff --check HEAD^ HEAD
 
   dependency-policy:
     needs: plan
-    if: needs.plan.outputs.mode != 'docs'
+    if: needs.plan.outputs.mode == 'quick' || needs.plan.outputs.mode == 'candidate'
     name: Dependency policy
     runs-on: ubuntu-24.04
     steps:
@@ -77,7 +82,7 @@ jobs:
 
   test:
     timeout-minutes: 20
-    if: needs.plan.outputs.mode != 'docs'
+    if: needs.plan.outputs.mode == 'quick' || needs.plan.outputs.mode == 'candidate'
     name: ${{ matrix.os }} / Go ${{ matrix.go }}
     needs: [plan, dependency-policy]
     runs-on: ${{ matrix.os }}

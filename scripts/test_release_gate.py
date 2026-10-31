@@ -5,7 +5,7 @@ from release_gate import accepted
 class ReleaseGateTests(unittest.TestCase):
     def setUp(self):
         self.sha='a'*40
-        self.run=dict(head_sha=self.sha,head_branch='main',event='push',conclusion='success',path='.github/workflows/ci.yml')
+        self.run=dict(status='completed',head_sha=self.sha,head_branch='main',event='push',conclusion='success',path='.github/workflows/ci.yml')
         names=['plan','Dependency policy','Accepted validation plan','Race, coverage and CLI smoke tests']
         names += [f'{platform} / Go {version}' for platform in ('ubuntu-24.04','windows-2022','macos-15') for version in ('1.26.10','1.27.3')]
         self.jobs=[dict(name=n,conclusion='success') for n in names]

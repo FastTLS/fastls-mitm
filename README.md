@@ -60,9 +60,9 @@ with requests.Session() as session:
 
 ## 更多文档
 
-[开发候选响应契约](RESPONSE_CONTRACT.md)：默认路径与策略路径的正文、Trailer、跳转、连接复用和取消行为，以及真实连接测试入口。正式发布包尚未包含本批修复。
+[已发布响应契约](RESPONSE_CONTRACT.md)：默认路径与策略路径的正文、Trailer、跳转、连接复用和取消行为，以及真实连接测试入口。服务 v0.1.2 已包含这些修复。
 
-[开发源码地址策略与资源限额](ADDRESS_POLICY.md)：包含新核心下的 CONNECT 检查、接入连接、请求与隧道配额。当前正式发布包不含这些选项；默认依赖和显式开发工作区分别验证。
+[已发布地址策略与资源限额](ADDRESS_POLICY.md)：包含新核心下的 CONNECT 检查、接入连接、请求与隧道配额。v0.1.2 独立正式二进制包含这些选项；策略需显式启用。
 
 [代理参数与行为](MITM_PROXY.md) · [委托示例](DELEGATE_EXAMPLE.md) · [客户端示例](example/README.md) · [源码开发](DEVELOPMENT.md) · [产物验证](ARTIFACTS.md)
 
@@ -80,8 +80,8 @@ FastTLS 自有代码采用 [Apache-2.0](LICENSE)，见 [NOTICE](NOTICE)。第三
 
 仅在拥有权限的系统、数据和网络上使用，并遵守适用法律、服务条款及隐私要求。软件按许可证约定以“现状”提供，不承诺可用性、特定用途适用性、第三方服务放行、匿名性或与真实浏览器完全一致。浏览器名称和版本用于描述配置，不表示获得相应厂商认证或背书。部署方负责访问控制、密钥和个人信息保护、请求限额及数据备份；担保排除与责任限制以随附许可证及适用法律为准。本说明不改变许可证授予的权利或新增许可限制。
 
-## Development audit
+## Optional audit (released since v0.1.1)
 
-[Optional audit events and limits](AUDIT.md): disabled by default, with fixed redacted fields and bounded drain. This is a development candidate.
+[Optional audit events and limits](AUDIT.md): disabled by default, with fixed redacted fields and bounded drain. Available in service v0.1.1 and v0.1.2; auditing remains opt-in.
 
-发行构建先核对同一完整提交在 main 的成功 CI；RPC 同时要求完整服务联调成功。缺失、失败、取消或未获准跳过均阻止构建。main 保留常规验收，开发归档改为手动生成，正式标签只构建一次六平台发行字节；标签阶段复用精确候选证据，另验摘要、来源与真实安装。
+发行门禁接受同一完整提交的成功候选，或独立重新核验过的可信 main 祖先证明。复用要求源码、模块、生成输入、原生命令、工具链及平台配置一致，全部必需任务成功；未知差异、缺失、失败、取消和任意跳过均阻止签发。RPC 的跨仓契约单独检查固定引用、协议测试与执行配置，不随普通 Go 证明自动豁免。归档继续按实际生产提交构建、记录 vcs.revision 并签名，不将旧字节改标为新提交。main 不自动重复生成开发归档，正式标签每个平台只构建一次。

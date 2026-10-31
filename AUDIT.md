@@ -1,7 +1,7 @@
 # Optional bounded audit events
 
-This development candidate adds `-audit-file`, `-audit-queue` and
-`-audit-drain-timeout`. No released package is implied. With no audit file,
+Service v0.1.1 and v0.1.2 include `-audit-file`, `-audit-queue` and
+`-audit-drain-timeout`. Older development records describe their original scope. With no audit file,
 there is no audit worker, file or response wrapper. Existing request/response
 payloads and headers are unchanged; client-provided request IDs are not trusted
 or echoed by this feature.

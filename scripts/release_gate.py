@@ -3,12 +3,16 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import urllib.request
+from validation_inputs import (trusted_run, full_native, complete_jobs, find_native,
+                               input_equivalence)
 
 
 def accepted(run, jobs, sha, workflow):
     if (run.get('head_sha') != sha or run.get('head_branch') != 'main'
             or run.get('event') != 'push' or run.get('conclusion') != 'success'
+            or run.get('status') != 'completed'
             or run.get('path') != '.github/workflows/'+workflow):
         return False
     names = [job.get('name') for job in jobs]
@@ -32,6 +36,58 @@ def accepted(run, jobs, sha, workflow):
         workflow == 'workspace-integration.yml' and j.get('name') == 'development-policy' and j.get('conclusion') == 'skipped' for j in jobs)
 
 
+def reduced_native(run, jobs, sha, repository):
+    quality=[j.get('name') for j in jobs if j.get('name') in ('Race, coverage and CLI smoke test','Race, coverage and CLI smoke tests')]
+    if len(quality) != 1:
+        return False
+    wanted = {'plan': 'success', 'Accepted validation plan': 'success',
+              'Dependency policy': 'skipped', quality[0]: 'skipped',
+              '${{ matrix.os }} / Go ${{ matrix.go }}': 'skipped'}
+    return (trusted_run(run, sha, 'ci.yml', repository) and len(jobs) == len(wanted)
+            and {j.get('name'): j.get('conclusion') for j in jobs} == wanted)
+
+
+def resolve(root, sha, repository, api, native_only=False):
+    if repository not in ('FastTLS/fastls-fetch', 'FastTLS/fastls-rpc', 'FastTLS/fastls-mitm'):
+        raise ValueError('Untrusted service repository')
+    if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip() != sha:
+        raise ValueError('Checked-out consumer differs from requested source')
+    proofs=[]
+    runs=api('/actions/workflows/ci.yml/runs?head_sha='+sha+'&event=push&status=success&per_page=20')['workflow_runs']
+    for run in runs:
+        jobs=complete_jobs(api,run)
+        if trusted_run(run,sha,'ci.yml',repository) and full_native(run,jobs,repository):
+            proofs.append(dict(workflow='ci.yml',run_id=run['id'],head_sha=sha,
+                               consumer_sha=sha,mode='exact',jobs=jobs))
+            break
+        if reduced_native(run,jobs,sha,repository):
+            baseline=find_native(root,sha,api,repository)
+            if baseline:
+                proofs.append(dict(workflow='ci.yml',run_id=run['id'],head_sha=sha,
+                                   consumer_sha=sha,mode='verified-source-reuse',native_baseline=baseline,jobs=jobs))
+                break
+    else:
+        raise ValueError('No exact or independently verified native validation for '+sha)
+    if repository.endswith('/fastls-rpc') and not native_only:
+        runs=api('/actions/workflows/workspace-integration.yml/runs?event=push&status=success&branch=main&per_page=30')['workflow_runs']
+        for run in runs:
+            source=run.get('head_sha','')
+            if not trusted_run(run,source,'workspace-integration.yml',repository):
+                continue
+            try:
+                equivalence=input_equivalence(root,source,sha,'contract')
+                jobs=complete_jobs(api,run)
+                if accepted(run,jobs,source,'workspace-integration.yml'):
+                    proofs.append(dict(workflow='workspace-integration.yml',run_id=run['id'],
+                                       head_sha=source,consumer_sha=sha,input_verification=equivalence,jobs=jobs))
+                    break
+            except (ValueError,KeyError,IndexError,subprocess.CalledProcessError):
+                continue
+        else:
+            raise ValueError('No complete successful contract for unchanged consumer inputs')
+    return proofs
+
+
 def main():
     sha, repository = os.environ['GITHUB_SHA'], os.environ['GITHUB_REPOSITORY']
     if not re.fullmatch('[0-9a-f]{40}', sha):
@@ -42,20 +98,7 @@ def main():
                      'Accept':'application/vnd.github+json','User-Agent':'service-release-gate'})
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.load(response)
-    proofs=[]
-    workflows=['ci.yml']
-    if repository.endswith('/fastls-rpc'):
-        workflows.append('workspace-integration.yml')
-    for workflow in workflows:
-        runs=api('/actions/workflows/'+workflow+'/runs?head_sha='+sha+'&event=push&status=success&per_page=20')['workflow_runs']
-        for run in runs:
-            job_result=api('/actions/runs/'+str(run['id'])+'/jobs?per_page=100')
-            jobs=job_result['jobs']
-            if job_result['total_count'] == len(jobs) and accepted(run,jobs,sha,workflow):
-                proofs.append({'workflow':workflow,'run_id':run['id'],'head_sha':sha,'jobs':jobs})
-                break
-        else:
-            raise SystemExit('No complete successful main validation for '+workflow+' at '+sha)
+    proofs=resolve(Path.cwd(),sha,repository,api)
     output=Path(os.environ['ARTIFACT_ROOT'])/'gate.json'
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(proofs,indent=2)+'\n',encoding='utf-8')
