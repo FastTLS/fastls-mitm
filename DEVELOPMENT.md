@@ -48,7 +48,7 @@ go build -o build/fastls-mitm .
 
 ## 开发产物
 
-合入 `main` 或手动运行 `Development artifacts` 后，工作流生成临时开发产物。推送受审的 `v*` 标签时，同一流程在校验、交叉构建、计算摘要、签发和自验证全部成功后创建正式 GitHub Release，且不向其他渠道发布。详见 [ARTIFACTS.md](./ARTIFACTS.md)。
+手动运行 `Development artifacts` 后，工作流生成临时开发产物。推送受审的 `v*` 标签时，同一流程在校验、交叉构建、计算摘要、签发和自验证全部成功后创建正式 GitHub Release，且不向其他渠道发布。详见 [ARTIFACTS.md](./ARTIFACTS.md)。
 
 ## 变更约定
 
@@ -59,3 +59,5 @@ go build -o build/fastls-mitm .
 - 修改指纹选择范围时覆盖规范选择器、兼容别名和无效输入。
 - 新依赖必须在独立 module 下解析，且不能重新引入 `fhttp`。
 - 不得降低证书或私钥保护来简化测试。
+
+main 仍保留分级验收，普通更新不自动交叉打包开发归档。签发前要求同一完整提交在 main 的完整候选 CI 成功；RPC 还要求跨仓联调成功。只复用精确输入证据，正式标签一次构建各平台发行物，缺失/失败/取消或未获准跳过不能签发。纯文档同步不重跑 Go 平台矩阵；发行源码及其原始证明保持不变。
