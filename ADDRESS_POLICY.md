@@ -1,6 +1,6 @@
-# MITM 目标地址策略（开发源码）
+# MITM 目标地址策略
 
-P03-B3新增能力，尚未发布。正式fastls-mitm v0.1.0没有本页选项，当前公开核心fastls v0.1.1也没有所需能力。默认独立构建仍使用正式依赖；显式启用但核心不支持时，在监听和生成CA之前拒绝启动，不静默退回旧转发。
+服务 v0.1.2 固定 Go 核心 `v0.1.3-0.20261030152832-0dc4eea0f32e`，独立构建可启用本页可信启动策略。旧二进制不会自动获得修正；不支持策略/预检/origin 绑定的后端在监听和生成 CA 前拒绝启动，不退回旧转发。
 
 ## 启动配置
 
@@ -18,7 +18,7 @@ P03-B3新增能力，尚未发布。正式fastls-mitm v0.1.0没有本页选项�
 
 示例为文档域名/地址，须替换为实际获准目标。非空允许维度同时满足，CIDR拒绝优先；空列表/省略不自动禁止私网、回环或元数据服务。规则不热更新，请求头、Delegate的请求Options不能清除客户端固定策略。
 
-启用时还要求核心实现`CheckAddressPolicy(context.Context, *http.Request, string) error`，提供无目标套接字的预检和规范化origin绑定。新源码工作区提供`verify-p03-mitm.work`；普通正式依赖版本仍不能启用，需后续核心发布与依赖协调。测试和只读手动Action分别记录这两类构建，不用本地replace冒充已发布能力。
+启用时还要求核心实现`CheckAddressPolicy(context.Context, *http.Request, string) error`，提供无目标套接字的预检和规范化origin绑定。本版本使用固定公开模块，设置 `GOWORK=off` 即可独立构建；不使用本机 replace 或开发工作区冒充正式依赖。
 
 ## CONNECT 与实际出站
 
@@ -40,7 +40,7 @@ Delegate.Connect/Auth负责CONNECT；每条解密HTTP分别调用BeforeRequest�
 
 策略模式的外层和隧道内HTTP服务器配置64KiB MaxHeaderBytes（遵循标准库解析预算）、30秒读头/读写/空闲限制；每个转发请求上下文最多30秒，客户端握手另有30秒预算。停机关闭已登记连接并取消活动出站请求。
 
-## 请求并发、隧道数量与寿命（P03-B4开发源码）
+## 请求并发、隧道数量与寿命
 
 以下都是可信启动配置，不从请求头/DTO读取，默认0保持原有不限制行为。CLI显式设置但未启用address-policy时拒绝启动，Go选项非零也需策略；负值/超界在生成CA或监听前拒绝。
 
@@ -52,7 +52,7 @@ Delegate.Connect/Auth负责CONNECT；每条解密HTTP分别调用BeforeRequest�
 
 本模式直接返回上游3xx，由调用者决定下一次请求；下一次经代理的请求再次校验。不会替客户端自动跟随Location。上游正文截断会终止下游响应，不伪装为正常EOF。普通旧模式仍保持旧行为，不因新增选项自动改变。
 
-## 接入连接数与隧道累计字节（P03-B5开发源码）
+## 接入连接数与隧道累计字节
 
 这些选项同样只从可信启动配置读取，默认0禁用，显式CLI参数需address-policy；非法值在生成CA/监听前拒绝。
 
@@ -66,7 +66,7 @@ Delegate.Connect/Auth负责CONNECT；每条解密HTTP分别调用BeforeRequest�
 
 接入连接名额在底层关闭时幂等归还；请求/隧道名额在对应处理退出时归还。Shutdown宽限期到期后，策略模式强制关闭普通连接，避免未完成请求头或慢请求继续持有名额，同时仍返回原deadline错误；不能把强制清理表述为优雅完成。已劫持隧道仍由原登记表关闭。
 
-例如，已链接新核心的开发二进制可使用以下启动配置（先准备上文策略文件；当前正式Release不包含这些选项）：
+v0.1.2 二进制可使用以下启动配置（先准备上文策略文件）：
 
 ```text
 fastls-mitm -addr 127.0.0.1:8888 -address-policy policy.json -policy-max-connections 128 -policy-max-inflight 16 -policy-max-tunnels 32 -policy-tunnel-max-age 5m -policy-tunnel-max-read-bytes 16777216 -policy-tunnel-max-write-bytes 67108864
@@ -82,6 +82,10 @@ Fetch/JSON-RPC/gRPC可在自身策略关闭时通过本受限MITM作为parent_pr
 
 ## 验证与未完成项
 
-默认独立构建门禁覆盖旧核心拒绝及原代理兼容；显式工作区使用`go test -count=3 -tags mitm_policy_e2e -timeout 180s ./...`验证生效能力。覆盖CONNECT前拒绝、实际目标TCP连接计数、SNI/origin越界、H1/H2、二进制/Trailer、精确请求限额、流水ClientHello、认证和停机取消。RPC的policy_e2e包含三入口经受限MITM链路。缺少新核心时正向门禁失败，不跳过。
+独立构建使用 `GOWORK=off go test -count=1 -tags mitm_policy_e2e -timeout 180s ./...` 验证生效能力；旧核心拒绝在 RPC 的隔离依赖图中另验。覆盖CONNECT前拒绝、实际目标TCP连接计数、SNI/origin越界、H1/H2、二进制/Trailer、精确请求限额、流水ClientHello、认证和停机取消。RPC的policy_e2e包含三入口经受限MITM链路。缺少新核心时正向门禁失败，不跳过。
 
-仍未完成正式核心依赖升级、生效策略跨仓远端矩阵验收、速率/全实例累计流量限制、完整审计接口及FFI完整Spec输入。Fetch/RPC请求大小配置与本模式的请求/隧道并发、寿命、接入TCP名额及双向累计TLS字节预算已在开发源码增加；Fetch/RPC仍没有这里的全局接入TCP名额。本轮不发布或签发新产物。
+v0.1.2 升级固定核心并以跨仓、实际发行物门禁验收。请求/隧道并发、寿命、接入 TCP 名额与双向 TLS 字节预算保留；速率和全实例累计流量限制仍另行规划。可选脱敏审计不等于完整流量记录；SDK 的完整 Spec 已独立交付，不属于本服务新增接口。
+
+## 未指定目标与升级
+
+`0.0.0.0`、`::` 和 IPv4 映射零地址无条件按 `invalid_ip` 拒绝，即使配置了覆盖全部地址的允许 CIDR；它们不能被操作系统解释成回环目标来绕过拒绝规则。普通请求、重定向和实际新连接均受固定策略约束。空允许列表仍不等于自动禁止私网。服务未新增 H3 协议选择、UDP 代理或 Alt-Svc 支持；核心已有能力不能推导为服务入口支持。

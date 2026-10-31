@@ -40,6 +40,8 @@ jobs:
         run: python -m unittest discover -s scripts -p test_ci_plan.py -v
       - id: plan
         run: python scripts/ci_plan.py
+      - name: Validate release evidence rejection gates
+        run: python -m unittest discover -s scripts -p test_release_gate.py -v
       - name: Check patch whitespace
         run: git diff --check HEAD^ HEAD
 

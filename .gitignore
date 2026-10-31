@@ -25,6 +25,10 @@ vendor/
 .DS_Store
 Thumbs.db
 
+# Python validation helpers
+__pycache__/
+*.pyc
+
 # Logs
 *.log
 

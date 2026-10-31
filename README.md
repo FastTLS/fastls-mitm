@@ -6,6 +6,8 @@
 
 [完整代理说明](MITM_PROXY.md) · [委托模式](DELEGATE_EXAMPLE.md) · [发布包](https://github.com/FastTLS/fastls-mitm/releases)
 
+当前发行目标为 **v0.1.2**，固定核心 `v0.1.3-0.20261030152832-0dc4eea0f32e`；可信地址策略与未指定目标拒绝见 [ADDRESS_POLICY.md](ADDRESS_POLICY.md)。旧二进制须升级才能获得修正。
+
 ## 安装与启动
 
 从 Releases 下载匹配系统和架构的产物，按 [ARTIFACTS.md](ARTIFACTS.md) 校验。普通用户无需 Go。从源码构建需要 Go 1.26+：
@@ -81,3 +83,5 @@ FastTLS 自有代码采用 [Apache-2.0](LICENSE)，见 [NOTICE](NOTICE)。第三
 ## Development audit
 
 [Optional audit events and limits](AUDIT.md): disabled by default, with fixed redacted fields and bounded drain. This is a development candidate.
+
+发行构建先核对同一完整提交在 main 的成功 CI；RPC 同时要求完整服务联调成功。缺失、失败、取消或未获准跳过均阻止构建。main 保留常规验收，开发归档改为手动生成，正式标签只构建一次六平台发行字节；标签阶段复用精确候选证据，另验摘要、来源与真实安装。
