@@ -1,5 +1,7 @@
 # Fastls MITM 代理
 
+v0.1.3：固定核心 Go v0.2.1、profile v0.1.1、ftransport/imitate v0.1.2，继承 H3 连接回收修正；现有地址策略、审计和停机契约保持。
+
 [English documentation](https://fasttls.github.io/en/ecosystem/fastls-mitm)
 
 为经过授权的 HTTPS 调试与网络兼容性测试提供 HTTP 代理。代理解密客户端流量，再使用选定的 TLS/HTTP 配置连接目标；它能读取经过它的明文，必须作为敏感基础设施管理。
