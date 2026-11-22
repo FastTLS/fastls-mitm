@@ -1,5 +1,7 @@
 # Fastls MITM 代理
 
+v0.1.4：固定 imitate v0.1.3，更新 Chrome 158、Edge 158 和 Firefox 160 的 Windows 配置；显式使用 chrome158、edge158、firefox160，既有默认 selector 保持兼容。Go 核心 v0.2.1、profile v0.1.1、ftransport v0.1.2 保持。证据范围与每日维护见 [imitate](https://github.com/FastTLS/imitate/blob/v0.1.3/tools/maintenance/README.md)。下方旧版本说明保留历史范围。
+
 v0.1.3：固定核心 Go v0.2.1、profile v0.1.1、ftransport/imitate v0.1.2，继承 H3 连接回收修正；现有地址策略、审计和停机契约保持。
 
 [English documentation](https://fasttls.github.io/en/ecosystem/fastls-mitm)
