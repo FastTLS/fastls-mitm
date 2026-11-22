@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/FastTLS/fastls v0.2.1
 	github.com/FastTLS/ftransport v0.1.2
-	github.com/FastTLS/imitate v0.1.2
+	github.com/FastTLS/imitate v0.1.3
 	github.com/refraction-networking/utls v1.8.2
 	github.com/sirupsen/logrus v1.9.3
 	golang.org/x/net v0.61.0
